@@ -2,6 +2,7 @@ import * as BABYLON from '@babylonjs/core';
 import { MATERIAL_TEXTURE_SLOTS } from './BabylonFileSchema';
 import { babylonJsonReplacer, serializeKeys } from './BabylonJsonBinding';
 import { modelKeys } from './AnimationController';
+import { ClipConverter, decomposeTransform } from './ClipConverter';
 import { ModelConverter } from './ModelConverter';
 
 /**
@@ -46,11 +47,22 @@ const COLLECTIONS = {
  * @property {number} length frames from the first to the last
  * @property {{ target: { kind: 'bone' | 'node', name: string }, animation: any }[]} tracks animations
  *   in the `.babylon` format
+ * @property {boolean} [mirrored] the tracks are local transforms of a mirrored space (glTF models are
+ *   under a `__root__` node with scaling z = -1)
  */
 
 /**
- * What pasting a clip asks the host before it can go on, or reports when done.
- * @typedef {{ choose: 'skeleton', options: { id: string, label: string, description: string }[] } | { report: string }} PasteResult
+ * @param {BABYLON.Node | null | undefined} node
+ * @returns {boolean} the node is in a mirrored space (its world matrix turns left- into right-handed)
+ */
+function isMirrored(node) {
+    return !!node && node.computeWorldMatrix(true).determinant() < 0;
+}
+
+/**
+ * What pasting a clip asks the host before it can go on (the skeleton it goes to, which channels
+ * a converted clip takes), or reports when done.
+ * @typedef {{ choose: 'skeleton' | 'channels', options: { id: string, label: string, description: string }[] } | { report: string }} PasteResult
  */
 
 /** Key frames closer than this are one frame. */
@@ -344,7 +356,7 @@ export class ModelEdits {
      * @param {ClipboardObject} object
      * @param {boolean} [sameFile] it was copied from this model: the copy keeps sharing the materials,
      *   the skeletons and the parent of the original (another model gets copies of them)
-     * @param {{ skeletonId?: string }} [choices] answers to a `PasteResult.choose` (the skeleton of a clip)
+     * @param {{ skeletonId?: string, channels?: 'all' | 'rotations' }} [choices] answers to a `PasteResult.choose`
      * @returns {PasteResult | undefined}
      */
     paste(section, object, sameFile = false, choices = {}) {
@@ -375,7 +387,29 @@ export class ModelEdits {
         }
         if (!tracks.length) throw new Error(`${clip.name} has no keys to copy`);
         const type = container.animationGroups.includes(clip.group) ? 'group' : 'timeline';
-        return JSON.parse(JSON.stringify({ type, name: clip.name, length: clip.to - clip.from, tracks }, babylonJsonReplacer));
+        const mirrored = ModelEdits._isClipSpaceMirrored(clip.group.targetedAnimations.map(({ target }) => target), container);
+        return JSON.parse(JSON.stringify({ type, name: clip.name, length: clip.to - clip.from, tracks, mirrored }, babylonJsonReplacer));
+    }
+
+    /**
+     * Whether animated targets live in a mirrored space: a bone in that of the meshes it deforms,
+     * a node in that of its parent.
+     * @param {any[]} targets
+     * @param {BABYLON.AssetContainer} container
+     * @returns {boolean}
+     */
+    static _isClipSpaceMirrored(targets, container) {
+        const target = targets.find(candidate => candidate instanceof BABYLON.Bone || candidate instanceof BABYLON.TransformNode);
+        if (!target) return false;
+        if (target instanceof BABYLON.Bone) {
+            const skeleton = target.getSkeleton();
+            return isMirrored(container.meshes.find(mesh => mesh.skeleton === skeleton));
+        }
+        // The space of the topmost animated node: the parent of the hierarchy
+        let node = target;
+        const animated = new Set(targets);
+        while (node.parent && animated.has(node.parent)) node = node.parent;
+        return isMirrored(node.parent);
     }
 
     /**
@@ -387,18 +421,30 @@ export class ModelEdits {
      * @param {{ skeletonId?: string }} choices
      * @returns {PasteResult}
      */
-    _pasteClip(source, choices) {
-        if (!source || !Array.isArray(source.tracks) || !source.tracks.length) throw new Error('The copied clip has no tracks');
+    _pasteClip(copied, choices) {
+        if (!copied || !Array.isArray(copied.tracks) || !copied.tracks.length) throw new Error('The copied clip has no tracks');
         const container = this._container();
+        // A model keeps one kind of clips: a clip of the other kind is converted
         const groups = container.animationGroups.length > 0;
         const timeline = !groups && this._animations.clips.length > 0;
-        if (source.type === 'group' && timeline) throw new Error('This model keeps its clips as frame ranges of one timeline: an animation group (glTF) cannot be pasted into it');
-        if (source.type === 'timeline' && groups) throw new Error('This model keeps its clips as animation groups (glTF): a frame range of a timeline cannot be pasted into it');
-        const name = uniqueName(source.name || 'Clip', this._animations.clips.map(clip => clip.name));
+        const kind = groups ? 'group' : timeline ? 'timeline' : copied.type;
+        const converted = kind !== copied.type;
+        if (converted && !choices.channels) {
+            return {
+                choose: 'channels',
+                options: [
+                    { id: 'all', label: 'Positions, rotations and scalings', description: 'as in the copied clip' },
+                    { id: 'rotations', label: 'Rotations only', description: 'positions and scalings of the rest pose: safer between different models' },
+                ],
+            };
+        }
+        const name = uniqueName(copied.name || 'Clip', this._animations.clips.map(clip => clip.name));
         const nodes = new Map([...container.transformNodes, ...container.meshes].map(node => [node.name, node]));
         let skeletons = container.skeletons;
-        const boneTracks = source.tracks.filter(track => track.target?.kind === 'bone');
-        if (boneTracks.length && skeletons.length > 1) {
+        // Tracks that go to bones once converted: in a timeline every track of a joint node
+        const boneTracks = copied.tracks.filter(track => (kind === 'timeline' ? track.target?.kind === 'bone' || (converted && track.target?.kind === 'node') : track.target?.kind === 'bone'));
+        const boneNames = [...new Set(boneTracks.map(track => track.target.name))];
+        if (boneNames.length && skeletons.length > 1) {
             const chosen = skeletons.find(skeleton => String(skeleton.uniqueId) === choices.skeletonId);
             if (!chosen) {
                 return {
@@ -406,13 +452,14 @@ export class ModelEdits {
                     options: skeletons.map(skeleton => ({
                         id: String(skeleton.uniqueId),
                         label: skeleton.name || '(unnamed)',
-                        description: `${boneTracks.filter(track => skeleton.bones.some(bone => bone.name === track.target.name)).length} of ${boneTracks.length} bones`,
+                        description: `${boneNames.filter(boneName => skeleton.bones.some(bone => bone.name === boneName)).length} of ${boneNames.length} bones`,
                     })),
                 };
             }
             skeletons = [chosen];
         }
         const skeleton = skeletons[0] ?? null;
+        const source = this._convertClip(copied, kind, skeleton, nodes, choices.channels === 'rotations');
         const targetOf = target => (target?.kind === 'bone' ? skeleton?.bones.find(bone => bone.name === target.name) : nodes.get(target?.name)) ?? null;
         const matched = source.tracks.map(track => ({ track, target: targetOf(track.target) })).filter(({ target }) => target);
         const missing = source.tracks.filter(track => !targetOf(track.target)).map(track => track.target?.name ?? '?');
@@ -423,7 +470,33 @@ export class ModelEdits {
             this._pasteRange(name, source.length, matched, skeleton);
         }
         const unique = [...new Set(missing)];
-        return { report: `Pasted ${name}: ${matched.length} of ${source.tracks.length} tracks${unique.length ? `; not found: ${unique.slice(0, 5).join(', ')}${unique.length > 5 ? ', …' : ''}` : ''}` };
+        const conversion = converted ? `; converted from ${copied.type === 'group' ? 'an animation group' : 'a frame range'}${choices.channels === 'rotations' ? ', rotations only' : ''}` : '';
+        return { report: `Pasted ${name}: ${matched.length} of ${source.tracks.length} tracks${conversion}${unique.length ? `; not found: ${unique.slice(0, 5).join(', ')}${unique.length > 5 ? ', …' : ''}` : ''}` };
+    }
+
+    /**
+     * A copied clip in the kind and the space of this model: converted between frame ranges and
+     * animation groups, mirrored between a mirrored (glTF) and a not mirrored space.
+     * @param {CopiedClip} copied
+     * @param {'group' | 'timeline'} kind the kind of clips of this model
+     * @param {BABYLON.Skeleton | null} skeleton the skeleton a timeline clip goes to
+     * @param {Map<string, BABYLON.TransformNode>} nodes nodes of this model by name
+     * @param {boolean} rotationsOnly
+     * @returns {CopiedClip}
+     */
+    _convertClip(copied, kind, skeleton, nodes, rotationsOnly) {
+        const container = this._container();
+        const targets = copied.tracks.map(track => (kind === 'timeline' && skeleton ? skeleton.bones.find(bone => bone.name === track.target?.name) : null) ?? nodes.get(track.target?.name)).filter(Boolean);
+        const mirror = !!copied.mirrored !== ModelEdits._isClipSpaceMirrored(targets, container);
+        if (kind === copied.type) return mirror ? ClipConverter.mirror(copied) : copied;
+        if (kind === 'timeline') {
+            const restOf = (boneName) => {
+                const bone = skeleton?.bones.find(candidate => candidate.name === boneName);
+                return bone ? decomposeTransform(bone.getRestMatrix()) : null;
+            };
+            return ClipConverter.toTimeline(copied, { rotationsOnly, mirror, restOf });
+        }
+        return ClipConverter.toGroup(copied, { rotationsOnly, mirror });
     }
 
     /**

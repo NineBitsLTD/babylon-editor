@@ -239,13 +239,18 @@ export class ModelTreeProvider {
             // Not JSON: not a copied object
         }
         if (!object) throw new Error(`The clipboard has no copied object: copy one with Copy in the model tree first`);
+        // A clip may ask which channels a converted clip takes and which skeleton it goes to
+        const questions = {
+            channels: { key: 'channels', title: `${object.value?.name ?? 'The clip'} is converted to the kind of clips of this model: take` },
+            skeleton: { key: 'skeletonId', title: `Skeleton for ${object.value?.name ?? 'the clip'}` },
+        };
         const choices = {};
         let result = await this._command({ op: 'paste', section, extra: { object, sameFile, choices } });
-        // A clip asks which skeleton of the model it goes to
-        if (result?.choose === 'skeleton') {
-            const picked = await vscode.window.showQuickPick(result.options.map(option => ({ ...option, option })), { title: `Skeleton for ${object.value?.name ?? 'the clip'}` });
+        for (let asked = 0; result?.choose && questions[result.choose] && asked < Object.keys(questions).length; asked++) {
+            const question = questions[result.choose];
+            const picked = await vscode.window.showQuickPick(result.options.map(option => ({ ...option, option })), { title: question.title });
             if (!picked) return;
-            choices.skeletonId = picked.option.id;
+            choices[question.key] = picked.option.id;
             result = await this._command({ op: 'paste', section, extra: { object, sameFile, choices } });
         }
         if (result?.report) vscode.window.showInformationMessage(result.report);
