@@ -541,7 +541,8 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PropertyDescriptor[]}
      */
-    static _nodeProperties(node, { container }) {
+    static _nodeProperties(node, context) {
+        const { container } = context;
         const isMesh = node instanceof BABYLON.AbstractMesh;
         /** @type {PropertyDescriptor[]} */
         const properties = [
