@@ -140,4 +140,4 @@ dist/                       # bundled output loaded by VS Code (git-ignored)
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 NineBits LLC
