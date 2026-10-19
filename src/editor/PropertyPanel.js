@@ -23,7 +23,8 @@ const COLLAPSED_BY_DEFAULT = new Set(['Other file fields']);
  * @property {() => any} [capture] exact state snapshot for undo (defaults to get)
  * @property {(state: any) => void} [restore] restores a captured snapshot (defaults to set)
  * @property {string[]} [components] component labels for 'vector'
- * @property {() => { value: string, label: string }[]} [options] for 'select'
+ * @property {() => { value: string, label: string, disabled?: boolean }[]} [options] for 'select' (a disabled option is shown but cannot be chosen)
+ * @property {PanelAction} [action] a small button after the value (e.g. open the chosen object)
  * @property {boolean} [nullable] an empty 'number' input means null
  * @property {boolean} [transient] editor state, not a model change (not recorded for undo)
  * @property {() => boolean} [isUnset] the file has no value for it yet (shown dimmed; setting a value adds it)
@@ -795,10 +796,11 @@ export class PropertyPanel {
                 const select = document.createElement('select');
                 select.className = 'inspector__input';
                 select.disabled = !editable;
-                select.append(...(property.options?.() ?? []).map(({ value: optionValue, label: optionLabel }) => {
+                select.append(...(property.options?.() ?? []).map(({ value: optionValue, label: optionLabel, disabled }) => {
                     const option = document.createElement('option');
                     option.value = optionValue;
                     option.textContent = optionLabel;
+                    option.disabled = !!disabled;
                     return option;
                 }));
                 select.value = property.get();
@@ -819,7 +821,31 @@ export class PropertyPanel {
                 value.append(text);
             }
         }
+        if (property.action) value.append(this._renderValueAction(property.action));
         return [label, value];
+    }
+
+    /**
+     * An icon button after the editor of a property; its enabled state is re-read on refresh.
+     * @param {PanelAction} action
+     * @returns {HTMLButtonElement}
+     */
+    _renderValueAction(action) {
+        const read = value => typeof value === 'function' ? value() : value;
+        const button = document.createElement('button');
+        button.className = 'inspector__value-action';
+        const update = () => {
+            button.innerHTML = `<i class="codicon codicon-${read(action.icon)}"></i>`;
+            button.title = read(action.title) ?? read(action.label);
+            button.disabled = this._isActionDisabled(action);
+        };
+        update();
+        this._updaters.push(update);
+        button.addEventListener('click', () => {
+            action.run();
+            this.refresh();
+        });
+        return button;
     }
 
     /**

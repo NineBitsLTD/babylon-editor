@@ -1,7 +1,7 @@
 import * as BABYLON from '@babylonjs/core';
 import { formatJson } from '../utils/collapseBabylon';
 import { MATERIAL_TEXTURE_SLOTS } from './BabylonFileSchema';
-import { float32 } from './BabylonJsonBinding';
+import { babylonJsonReplacer } from './BabylonJsonBinding';
 import { textureLabel } from './ModelOutline';
 import { ModelSerializer } from './ModelSerializer';
 
@@ -98,8 +98,8 @@ export class ModelConverter {
 
     /**
      * The model of a scene as a `.babylon` document, written the way conversions write it: only the
-     * model, without default-material references and texture urls, numbers as the shortest decimals
-     * of their 32-bit floats, small objects (keys) on one line. Names and ids are taken as they are.
+     * model, without default-material references and texture urls, typed arrays (matrices) as arrays,
+     * numbers as the shortest decimals of their 32-bit floats, small objects (keys) on one line. Names and ids are taken as they are.
      * @param {object} options
      * @param {BABYLON.Scene} options.scene
      * @param {BABYLON.AssetContainer} options.container the model
@@ -108,9 +108,10 @@ export class ModelConverter {
      */
     static async writeBabylon({ scene, container, producer }) {
         const json = await ModelSerializer.withModelOnly(scene, container, () => BABYLON.SceneSerializer.Serialize(scene));
-        ModelConverter._clean(json);
+        ModelConverter.clean(json);
         if (producer) json.producer = producer;
-        const text = JSON.stringify(json, (key, value) => (typeof value === 'number' ? float32(value) : value));
+        // Matrices are Float32Arrays: written as arrays, not as objects
+        const text = JSON.stringify(json, babylonJsonReplacer);
         return formatJson(text, '  ', '', INLINE_OBJECT_LENGTH);
     }
 
@@ -207,7 +208,7 @@ export class ModelConverter {
      * default material and the urls of textures (the name or the embedded image locate them).
      * @param {any} json
      */
-    static _clean(json) {
+    static clean(json) {
         const materialIds = new Set([...(json.materials ?? []), ...(json.multiMaterials ?? [])].map(material => material.id));
         for (const mesh of json.meshes ?? []) {
             if (mesh.materialId !== undefined && !materialIds.has(mesh.materialId)) {

@@ -32,6 +32,10 @@ export class ModelTreeProvider {
     static addCommand = 'babylon-editor.tree.add';
     static renameCommand = 'babylon-editor.tree.rename';
     static deleteCommand = 'babylon-editor.tree.delete';
+    static copyCommand = 'babylon-editor.tree.copy';
+    static pasteCommand = 'babylon-editor.tree.paste';
+    /** Marks a model object in the clipboard (copied from a model tree, pasted into this or another model). */
+    static clipboardFormat = 'babylon-editor.object';
     /** Scheme of the tree item uris that carry the change decorations. */
     static decorationScheme = 'babylon-tree';
 
@@ -89,6 +93,8 @@ export class ModelTreeProvider {
             vscode.commands.registerCommand(ModelTreeProvider.addCommand, node => this._run(() => this._add(node))),
             vscode.commands.registerCommand(ModelTreeProvider.renameCommand, node => this._run(() => this._rename(node))),
             vscode.commands.registerCommand(ModelTreeProvider.deleteCommand, node => this._run(() => this._delete(node))),
+            vscode.commands.registerCommand(ModelTreeProvider.copyCommand, node => this._run(() => this._copy(node))),
+            vscode.commands.registerCommand(ModelTreeProvider.pasteCommand, node => this._run(() => this._paste(node))),
         );
     }
 
@@ -200,6 +206,49 @@ export class ModelTreeProvider {
         );
         if (answer !== 'Delete') return;
         await this._command({ op: 'delete', id: node.id });
+    }
+
+    /**
+     * Copies a model object (a node with its hierarchy, a skeleton) to the clipboard as JSON, so it
+     * can be pasted into this or another model, also in another window. The file it was copied from
+     * is noted: pasted into the same file, the copy shares materials and skeletons with the original.
+     * @param {ModelTreeNode} node a model object
+     */
+    async _copy(node) {
+        const object = await this._command({ op: 'copy', id: node.id });
+        const source = this._documentUri?.toString() ?? null;
+        await vscode.env.clipboard.writeText(JSON.stringify({ format: ModelTreeProvider.clipboardFormat, source, ...object }));
+        vscode.window.setStatusBarMessage(`Copied ${node.label}`, 3000);
+    }
+
+    /**
+     * Pastes the model object of the clipboard into a section (a new object).
+     * @param {ModelTreeNode} node a section
+     */
+    async _paste(node) {
+        const section = node.contextValue.slice('section:'.length);
+        let object = null;
+        let sameFile = false;
+        try {
+            const parsed = JSON.parse(await vscode.env.clipboard.readText());
+            if (parsed?.format === ModelTreeProvider.clipboardFormat) {
+                object = { kind: parsed.kind, value: parsed.value };
+                sameFile = !!parsed.source && parsed.source === this._documentUri?.toString();
+            }
+        } catch {
+            // Not JSON: not a copied object
+        }
+        if (!object) throw new Error(`The clipboard has no copied object: copy one with Copy in the model tree first`);
+        const choices = {};
+        let result = await this._command({ op: 'paste', section, extra: { object, sameFile, choices } });
+        // A clip asks which skeleton of the model it goes to
+        if (result?.choose === 'skeleton') {
+            const picked = await vscode.window.showQuickPick(result.options.map(option => ({ ...option, option })), { title: `Skeleton for ${object.value?.name ?? 'the clip'}` });
+            if (!picked) return;
+            choices.skeletonId = picked.option.id;
+            result = await this._command({ op: 'paste', section, extra: { object, sameFile, choices } });
+        }
+        if (result?.report) vscode.window.showInformationMessage(result.report);
     }
 
     /**

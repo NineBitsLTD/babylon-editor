@@ -1,6 +1,7 @@
 import * as BABYLON from '@babylonjs/core';
 import { BABYLON_FILE_SCHEMA, MATERIAL_TEXTURE_SLOTS, schemaProperties } from './BabylonFileSchema';
 import { ClipFrameEditor } from './ClipFrameEditor';
+import { formatNumber } from './DataTable';
 import { textureLabel, triangleCount } from './ModelOutline';
 import { texturePreview } from './TextureImage';
 
@@ -40,6 +41,25 @@ import { texturePreview } from './TextureImage';
 
 const RAD_TO_DEG = 180 / Math.PI;
 const DEG_TO_RAD = Math.PI / 180;
+
+/**
+ * @param {BABYLON.AbstractMesh} mesh
+ * @returns {number} how many bones the skin of the mesh needs (the highest bone index its vertices
+ *   refer to with a weight, plus one); 0 without skin
+ */
+function requiredBones(mesh) {
+    const K = BABYLON.VertexBuffer;
+    let highest = -1;
+    for (const [indicesKind, weightsKind] of [[K.MatricesIndicesKind, K.MatricesWeightsKind], [K.MatricesIndicesExtraKind, K.MatricesWeightsExtraKind]]) {
+        const indices = mesh.getVerticesData?.(indicesKind);
+        const weights = mesh.getVerticesData?.(weightsKind);
+        if (!indices || !weights) continue;
+        for (let index = 0; index < indices.length; index++) {
+            if (weights[index] > 0 && indices[index] > highest) highest = indices[index];
+        }
+    }
+    return highest + 1;
+}
 
 // --- Generic property builders -------------------------------------------------------------
 
@@ -553,9 +573,46 @@ export class ModelProperties {
                 readonlyProperty('Vertices', () => node.getTotalVertices()),
                 readonlyProperty('Triangles', () => triangleCount(node)),
                 readonlyProperty('Indices', () => node.getTotalIndices()),
-                readonlyProperty('Skeleton', () => node.skeleton?.name ?? '—'),
+                ...ModelProperties._skinProperties(node, context),
             );
         }
+        return properties;
+    }
+
+    /**
+     * The skeleton that deforms a mesh (one per mesh; several meshes may share one) and the number
+     * of bones that move each vertex. A skeleton with fewer bones than the vertices refer to cannot
+     * be chosen.
+     * @param {BABYLON.AbstractMesh} mesh
+     * @param {PropertiesContext} context
+     * @returns {PropertyDescriptor[]}
+     */
+    static _skinProperties(mesh, { container, openObject }) {
+        const needed = requiredBones(mesh);
+        /** @type {PropertyDescriptor[]} */
+        const properties = [{
+            label: 'Skeleton',
+            type: 'select',
+            options: () => [
+                { value: '', label: '(none)' },
+                ...container.skeletons.map(skeleton => ({
+                    value: String(skeleton.uniqueId),
+                    label: `${skeleton.name || '(unnamed)'} · ${skeleton.bones.length} bones${needed > skeleton.bones.length ? ` (needs ${needed})` : ''}`,
+                    disabled: needed > skeleton.bones.length,
+                })),
+            ],
+            get: () => String(mesh.skeleton?.uniqueId ?? ''),
+            set: (value) => { mesh.skeleton = container.skeletons.find(skeleton => String(skeleton.uniqueId) === value) ?? null; },
+            action: {
+                label: 'Open',
+                title: 'Open the skeleton in its own inspector',
+                icon: 'go-to-file',
+                transient: true,
+                isDisabled: () => !mesh.skeleton,
+                run: () => openObject({ kind: 'skeleton', skeleton: mesh.skeleton }),
+            },
+        }];
+        if (mesh.skeleton || needed) properties.push(readonlyProperty('Bone influencers', () => mesh.numBoneInfluencers));
         return properties;
     }
 
@@ -574,6 +631,37 @@ export class ModelProperties {
             return 'glTF ignores the transform of skinned meshes: position, rotation and scaling of this mesh are not saved.';
         }
         return undefined;
+    }
+
+    /**
+     * The Skin group of the vertex table (read-only): one cell per bone influence with the bone
+     * name and the weight (`matricesIndices` / `matricesWeights`, and their `Extra` buffers for more
+     * than four influences); an influence without weight shows a dash.
+     * @param {BABYLON.Mesh} mesh
+     * @param {import('./DataTable').TableColumn[]} columns receives the columns
+     * @param {{ key: string, label: string }[]} groups receives the group
+     */
+    static _skinColumns(mesh, columns, groups) {
+        const K = BABYLON.VertexBuffer;
+        const sets = [[K.MatricesIndicesKind, K.MatricesWeightsKind], [K.MatricesIndicesExtraKind, K.MatricesWeightsExtraKind]]
+            .filter(([indices, weights]) => mesh.isVerticesDataPresent(indices) && mesh.isVerticesDataPresent(weights));
+        if (!sets.length) return;
+        groups.push({ key: 'skin', label: 'Skin' });
+        sets.forEach(([indicesKind, weightsKind], set) => {
+            for (let slot = 0; slot < 4; slot++) {
+                columns.push({
+                    label: `I${set * 4 + slot + 1}`,
+                    group: 'skin',
+                    text: true,
+                    get: (row) => {
+                        const weight = mesh.getVerticesData(weightsKind)?.[row * 4 + slot] ?? 0;
+                        if (!weight) return '—';
+                        const index = mesh.getVerticesData(indicesKind)?.[row * 4 + slot] ?? 0;
+                        return `${mesh.skeleton?.bones[index]?.name ?? `#${index}`} ${formatNumber(weight, 3)}`;
+                    },
+                });
+            }
+        });
     }
 
     /**
@@ -611,6 +699,7 @@ export class ModelProperties {
         addColumns(K.PositionKind, 'Position', ['X', 'Y', 'Z']);
         addColumns(K.NormalKind, 'Normal', ['NX', 'NY', 'NZ']);
         addColumns(K.UVKind, 'UV', ['U', 'V']);
+        ModelProperties._skinColumns(mesh, columns, groups);
 
         const sharedWith = (mesh.geometry?.meshes.length ?? 1) - 1;
         return {

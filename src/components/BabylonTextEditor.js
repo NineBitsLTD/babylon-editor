@@ -400,7 +400,7 @@ export class BabylonTextEditor {
         const { document } = session;
         this._lastText = document.getText();
         const edit = new vscode.WorkspaceEdit();
-        for (const op of ops) {
+        for (const op of BabylonTextEditor._mergeInserts(ops)) {
             const change = op.op === 'set' ? this._textChange(index, op) : op.op === 'insert' ? this._insertChange(index, op) : this._removeChange(index, op);
             if (!change) {
                 vscode.window.showErrorMessage(`${label} was not written: ${(op.path ?? op.arrayPath).join('.')} has no place in the text`);
@@ -421,14 +421,40 @@ export class BabylonTextEditor {
      * @param {{ arrayPath: (string | number)[], value: any }} op
      * @returns {{ start: number, end: number, text: string } | null}
      */
-    _insertChange(index, { arrayPath, value }) {
+    _insertChange(index, { arrayPath, values }) {
         const array = index.find(arrayPath);
-        if (!array) return this._textChange(index, { path: arrayPath, value: [value] });
+        if (!array) return this._textChange(index, { path: arrayPath, value: values });
         if (array.kind === 'array') {
-            return { start: array.end - 1, end: array.end - 1, text: `${array.children.length ? ', ' : ''}${JSON.stringify(value)}` };
+            return { start: array.end - 1, end: array.end - 1, text: `${array.children.length ? ', ' : ''}${values.map(value => JSON.stringify(value)).join(', ')}` };
         }
-        // An empty (or flat) array is a leaf of the index: it is rewritten with the new item
-        return { start: array.start, end: array.end, text: JSON.stringify([...(JSON.parse(this._lastText.slice(array.start, array.end)) ?? []), value]) };
+        // An empty (or flat) array is a leaf of the index: it is rewritten with the new items
+        return { start: array.start, end: array.end, text: JSON.stringify([...(JSON.parse(this._lastText.slice(array.start, array.end)) ?? []), ...values]) };
+    }
+
+    /**
+     * Inserts into one array become one change: several changes at the end of an array, or several
+     * creations of a missing array, would overlap.
+     * @param {import('../editor/ModelEdits').DocumentOp[]} ops
+     * @returns {(import('../editor/ModelEdits').DocumentOp | { op: 'insert', arrayPath: (string | number)[], values: any[] })[]}
+     */
+    static _mergeInserts(ops) {
+        const merged = [];
+        const inserts = new Map();
+        for (const op of ops) {
+            if (op.op !== 'insert') {
+                merged.push(op);
+                continue;
+            }
+            const key = JSON.stringify(op.arrayPath);
+            if (inserts.has(key)) {
+                inserts.get(key).values.push(op.value);
+            } else {
+                const insert = { op: 'insert', arrayPath: op.arrayPath, values: [op.value] };
+                inserts.set(key, insert);
+                merged.push(insert);
+            }
+        }
+        return merged;
     }
 
     /**

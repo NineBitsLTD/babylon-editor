@@ -86,6 +86,18 @@
         "category": "Babylon"
       },
       {
+        "command": "babylon-editor.tree.copy",
+        "title": "Copy",
+        "category": "Babylon",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "babylon-editor.tree.paste",
+        "title": "Paste",
+        "category": "Babylon",
+        "icon": "$(clippy)"
+      },
+      {
         "command": "babylon-editor.tree.click",
         "title": "Show in the Inspector",
         "category": "Babylon"
@@ -199,6 +211,16 @@
           "command": "babylon-editor.tree.delete",
           "when": "view == babylon-editor.modelTree && viewItem =~ /^item:(?!timeline$)/",
           "group": "1_edit@2"
+        },
+        {
+          "command": "babylon-editor.tree.copy",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^item:(node|skeleton|clip)$/",
+          "group": "2_clipboard@1"
+        },
+        {
+          "command": "babylon-editor.tree.paste",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^section:(Nodes|Skeletons|Animations)$/",
+          "group": "2_clipboard@2"
         }
       ],
       "commandPalette": [
@@ -220,6 +242,14 @@
         },
         {
           "command": "babylon-editor.expandFragment",
+          "when": "false"
+        },
+        {
+          "command": "babylon-editor.tree.copy",
+          "when": "false"
+        },
+        {
+          "command": "babylon-editor.tree.paste",
           "when": "false"
         }
       ]

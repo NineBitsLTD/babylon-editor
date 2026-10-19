@@ -113,6 +113,12 @@ class Editor {
         this._source = null;
         /** @type {import('./editor/ModelOutline').TreeItem | null} */
         this._selection = null;
+        /**
+         * The inspectors opened before the shown one from an inspector (Open, a picked bone, …):
+         * the back button returns to the last of them, then to the file view.
+         * @type {import('./editor/ModelOutline').TreeItem[]}
+         */
+        this._backStack = [];
 
         this._history = this._textBacked
             ? new DocumentEditHistory({
@@ -302,7 +308,8 @@ class Editor {
      */
     _runTreeCommand({ op, id, name, section, kind, extra }) {
         if (!this._container) throw new Error('No model is loaded');
-        if (!this._canEdit && op !== 'info') throw new Error(`Editing .${this._type} files is not supported`);
+        // Reading commands also work for view-only formats
+        if (!this._canEdit && op !== 'info' && op !== 'copy') throw new Error(`Editing .${this._type} files is not supported`);
         const data = id ? (this._tree.get(id) ?? { data: this._inspectorObjects.get(id) })?.data : null;
         if (id && !data) throw new Error('The item no longer exists');
         switch (op) {
@@ -311,6 +318,8 @@ class Editor {
             case 'rename': return this._edits.rename(data, name);
             case 'delete': return this._edits.delete(data);
             case 'add': return this._edits.add(section, kind, name, extra);
+            case 'copy': return this._edits.copy(data);
+            case 'paste': return this._edits.paste(section, extra?.object, extra?.sameFile, extra?.choices);
             default: throw new Error(`Unknown command ${op}`);
         }
     }
@@ -342,7 +351,7 @@ class Editor {
             this._panel.refreshActions();
             return;
         }
-        this._select({ id: `picked-bone:${bone.uniqueId}`, label: () => bone.name, data: { kind: 'bone', bone } });
+        this._select({ id: `picked-bone:${bone.uniqueId}`, label: () => bone.name, data: { kind: 'bone', bone } }, this._selection);
     }
 
     /**
@@ -512,6 +521,8 @@ class Editor {
         let root = node;
         while (root.parent) root = root.parent;
         const rootItem = this._findTreeItem(this._tree.getRoots(), { kind: 'node', label: root.name });
+        // A new way: the inspectors of the model before a reload are gone
+        this._backStack = [];
         this._openObject({ kind: 'node', node }, rootItem);
     }
 
@@ -731,7 +742,8 @@ class Editor {
 
     /**
      * Shows an object listed in the inspector (a child node or a part of a mesh, a texture of a
-     * material) in its own inspector; its back button returns to the inspector it was opened from.
+     * material, the skeleton of a mesh) in its own inspector; its back button returns to the
+     * inspector it was opened from.
      * @param {import('./editor/ModelOutline').ModelItemData} data
      * @param {import('./editor/ModelOutline').TreeItem | null} [backTo] defaults to the shown item
      */
@@ -762,15 +774,27 @@ class Editor {
     }
 
     /**
+     * Shows an item in the inspector.
      * @param {import('./editor/ModelOutline').TreeItem} item
-     * @param {import('./editor/ModelOutline').TreeItem | null} [backTo] the back button returns to it (else to the file view)
+     * @param {import('./editor/ModelOutline').TreeItem | null} [backTo] the inspector it is opened from:
+     *   the back button returns there, then further back the way it came; without it a new way starts
+     *   (an item of the tree, the file view) and the back button returns to the file view
      */
     _select(item, backTo = null) {
+        this._backStack = backTo ? [...this._backStack, backTo] : [];
+        this._show(item);
+    }
+
+    /**
+     * Renders an item in the inspector; the back button goes one step back the way it came.
+     * @param {import('./editor/ModelOutline').TreeItem} item
+     */
+    _show(item) {
         this._selection = item;
         const context = this._propertiesContext();
         const content = ModelProperties.describe(item.data, context);
-        if (backTo) {
-            content.back = () => this._select(backTo);
+        if (this._backStack.length) {
+            content.back = () => this._show(this._backStack.pop());
         } else if (item.data.kind !== 'file') {
             content.back = () => {
                 // The tree item stays selected in VS Code; the next click on it opens it again

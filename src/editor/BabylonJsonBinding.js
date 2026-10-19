@@ -73,6 +73,19 @@ function float32Array(values) {
 }
 
 /**
+ * `JSON.stringify` replacer for values serialized by Babylon: typed arrays (e.g. the Float32Array of
+ * a matrix, which JSON writes as an object `{"0": …}`) become arrays, numbers their shortest float32
+ * decimals.
+ * @param {string} key
+ * @param {any} value
+ * @returns {any}
+ */
+export function babylonJsonReplacer(key, value) {
+    if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return float32Array(/** @type {ArrayLike<number>} */ (value));
+    return typeof value === 'number' ? float32(value) : value;
+}
+
+/**
  * @param {BABYLON.AssetContainer} container
  * @returns {Map<object, Set<string>>} the properties each node has animations for (its own and
  *   those of animation groups)
@@ -123,7 +136,7 @@ function valueAt(value, path) {
  * @param {BABYLON.Animation} animation
  * @returns {any[]} keys in the `.babylon` format
  */
-function serializeKeys(animation) {
+export function serializeKeys(animation) {
     const keys = animation.serialize().keys;
     // A key Babylon added at frame 0 while playing is not written
     if (hasRuntimeStartKey(animation.getKeys())) keys.shift();
@@ -181,11 +194,21 @@ export class BabylonJsonBinding {
         this._paths = new Map();
         /** @type {Map<BABYLON.BaseTexture, any>} texture objects of the document, by the loaded texture */
         this._textureSources = new Map();
+        /** @type {Map<BABYLON.Node | BABYLON.Skeleton | BABYLON.Material, number>} `uniqueId` of nodes (`parentId` refers to it), skeletons and materials in the document */
+        this._fileUniqueIds = new Map();
+        // The highest uniqueId of the document's nodes: new nodes take the ones above it
+        this._maxFileUniqueId = Math.max(-1, ...['meshes', 'transformNodes', 'cameras', 'lights']
+            .flatMap(kind => json[kind] ?? []).map(object => Number(object?.uniqueId)).filter(Number.isFinite));
         /** @type {DocumentField[]} */
         this.documentFields = [];
         this._bindDocument(json);
         this._bindMeshes(json, container);
         this._bindMaterials(json, container);
+        // Multi-materials are not edited, but meshes refer to them by uniqueId too
+        (json.multiMaterials ?? []).forEach((source) => {
+            const multi = container.multiMaterials?.find(candidate => candidate.id === source.id);
+            if (multi && Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(multi, Number(source.uniqueId));
+        });
         this._bindSkeletons(json, container);
         this._bindAnimationGroups(json, container);
         this._bindSerialized(json.cameras, container.cameras, 'cameras');
@@ -205,6 +228,21 @@ export class BabylonJsonBinding {
      */
     isInDocument(path) {
         return this._present.has(pathKey(path));
+    }
+
+    /**
+     * @param {BABYLON.Node} node
+     * @returns {number | null} the `uniqueId` the node has in the document (`parentId` of its children)
+     */
+    fileUniqueIdOf(node) {
+        return this._fileUniqueIds.get(node) ?? null;
+    }
+
+    /**
+     * @returns {number} a `uniqueId` no node of the document has (each call gives another)
+     */
+    nextFileUniqueId() {
+        return ++this._maxFileUniqueId;
     }
 
     /**
@@ -414,6 +452,7 @@ export class BabylonJsonBinding {
      */
     _bindNode(base, source, node) {
         this._paths.set(node, base);
+        if (Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(node, Number(source.uniqueId));
         const at = key => [...base, key];
         this._bind(at('name'), () => node.name, (value) => { node.name = value; });
         // A channel an animation drives shows the playing pose, not the value of the file: it is
@@ -434,6 +473,20 @@ export class BabylonJsonBinding {
         this._bind(at('materialId'), () => node.material?.id ?? source.materialId ?? '', (value) => {
             node.material = this._scene.getMaterialById(value) ?? this._scene.getMultiMaterialById?.(value) ?? null;
         });
+        // Babylon links the material by its uniqueId in the file first: it follows a changed material
+        // (null for a material without one, which is then found by id); a text change of it reloads
+        if (source.materialUniqueId != null) {
+            this._bind(at('materialUniqueId'), () => (node.material ? this._fileUniqueIds.get(node.material) ?? null : null), () => false);
+        }
+        // The skeleton that deforms the mesh (its vertices refer to the bones by index)
+        this._bind(at('skeletonId'), () => node.skeleton?.id ?? null, (value) => {
+            node.skeleton = value == null ? null : this._scene.getLastSkeletonById(value) ?? null;
+        });
+        // Babylon links the skeleton by its uniqueId in the file first: it follows a changed skeleton
+        // (null for a skeleton without one, which is then found by id); a text change of it reloads
+        if (source.skeletonUniqueId != null) {
+            this._bind(at('skeletonUniqueId'), () => (node.skeleton ? this._fileUniqueIds.get(node.skeleton) ?? null : null), () => false);
+        }
         if (node instanceof BABYLON.Mesh) {
             for (const [property, kind] of Object.entries(VERTEX_KINDS)) {
                 // Vertices stored in a shared geometry (`geometryId`) are not bound
@@ -532,6 +585,7 @@ export class BabylonJsonBinding {
             const material = container.materials.find(candidate => candidate.id === source.id);
             if (!material) return;
             this._paths.set(material, ['materials', index]);
+            if (Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(material, Number(source.uniqueId));
             const snapshot = () => {
                 if (!this._snapshots.has(material)) this._snapshots.set(material, material.serialize());
                 return this._snapshots.get(material);
@@ -651,6 +705,7 @@ export class BabylonJsonBinding {
             if (!skeleton) return;
             const base = ['skeletons', index];
             this._paths.set(skeleton, base);
+            if (Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(skeleton, Number(source.uniqueId));
             this._bindSchema(base, skeleton, BABYLON_FILE_SCHEMA.skeleton);
             this._bind([...base, 'name'], () => skeleton.name, (value) => { skeleton.name = value; });
             // Clips keep the range objects, so changed ranges are applied by reloading the model
