@@ -265,6 +265,7 @@
     "@babylonjs/procedural-textures": "^8.41.1",
     "@babylonjs/serializers": "^8.41.1",
     "@blueprintjs/core": "^6.4.1",
-    "@vscode/codicons": "^0.0.44"
+    "@vscode/codicons": "^0.0.44",
+    "fflate": "^0.8.3"
   }
 }

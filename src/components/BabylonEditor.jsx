@@ -10,6 +10,43 @@ export const BabylonEditorID = 'babylon-editor.editor';
 const VIEW_SETTINGS_KEY = 'babylonEditor.viewSettings';
 
 /**
+ * Where Babylon loads its decoders from (Draco, meshopt, KTX2 / Basis: scripts and WebAssembly run
+ * in blob workers) when a model needs them.
+ */
+const BABYLON_CDN = 'https://cdn.babylonjs.com';
+
+/**
+ * Content Security Policy of an editor webview: scripts only with the nonce of the page (and the
+ * decoders of Babylon's CDN), resources only from the extension and the model folder (the webview
+ * resource origin) or created by the page (data / blob urls of textures and workers).
+ * @param {vscode.Webview} webview
+ * @param {string} nonce
+ * @returns {string}
+ */
+function contentSecurityPolicy(webview, nonce) {
+    const source = webview.cspSource;
+    return [
+        "default-src 'none'",
+        `script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${BABYLON_CDN}`,
+        // Babylon adds style elements (loading screen); widgets set inline styles
+        `style-src ${source} 'unsafe-inline'`,
+        `font-src ${source}`,
+        // Babylon's loading screen shows images of its CDN
+        `img-src ${source} data: blob: ${BABYLON_CDN}`,
+        `media-src ${source} data: blob:`,
+        `connect-src ${source} data: blob: ${BABYLON_CDN}`,
+        `worker-src blob: ${BABYLON_CDN}`,
+    ].join('; ');
+}
+
+/**
+ * @returns {string} a random value for the `nonce` of the scripts of a webview page
+ */
+function createNonce() {
+    return globalThis.crypto.randomUUID().replace(/-/g, '');
+}
+
+/**
  * @implements {vscode.CustomEditorProvider<BabylonDocument>}
  */
 /**
@@ -415,16 +452,18 @@ export class BabylonEditor {
             rootUrl: webview.asWebviewUri(vscode.Uri.joinPath(ConvertedModels.toOriginalUri(document.uri) ?? document.uri, '..')).toString() + '/',
             ...extraPayload,
         }).replace(/</g, '\\u003c');
+        const nonce = createNonce();
 
         return <html lang="en">
             <head>
                 <meta charset="UTF-8"/>
+                <meta http-equiv="Content-Security-Policy" content={contentSecurityPolicy(webview, nonce)}/>
                 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
                 <title>Babylon Editor</title>
                 <link href={codiconsUri.toString()} rel="stylesheet" />
                 <link href={styleUri.toString()} rel="stylesheet" />
-                <script src={scriptUri.toString()} />
-                <script>{`window.payload = ${payload};`}</script>
+                <script nonce={nonce} src={scriptUri.toString()} />
+                <script nonce={nonce}>{`window.payload = ${payload};`}</script>
             </head>
             <body>
                 <div className="editor">

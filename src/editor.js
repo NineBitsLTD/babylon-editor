@@ -1,5 +1,6 @@
 import * as BABYLON from '@babylonjs/core';
 import '@babylonjs/loaders';
+import * as fflate from 'fflate';
 import { AnimationController } from './editor/AnimationController';
 import { BabylonJsonBinding } from './editor/BabylonJsonBinding';
 import { CameraController } from './editor/CameraController';
@@ -20,6 +21,10 @@ import { TextureImage } from './editor/TextureImage';
 import { Toolbar } from './editor/Toolbar';
 
 const vscode = acquireVsCodeApi();
+
+// The splat loader unzips with fflate, loaded from unpkg.com unless it is there: the bundled copy
+// keeps the webview off third-party scripts (its Content Security Policy does not allow them)
+window.fflate = fflate;
 
 /** Below this width (px) of the editor the model and the inspector are shown one at a time. */
 const NARROW_WIDTH = 500;

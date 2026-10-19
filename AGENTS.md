@@ -21,7 +21,7 @@ There are no tests yet: `.vscode-test.mjs` targets `test/**/*.test.js`, but neit
 
 Individual build steps live as separate npm scripts (`build:js`, `build:js-editor`, `build:css`) — use them to rebuild a single target instead of the whole pipeline.
 
-To run/debug the extension: press F5 in VS Code (uses the "Run Extension" launch config in `.vscode/launch.json`, which loads the extension from the workspace folder). The extension entry point is `dist/extension.cjs`, so **you must build (or watch) before launching** — VS Code loads bundled output, not `src/`.
+To run/debug the extension: press F5 in VS Code (uses the "Run Extension" launch config in `.vscode/launch.json`, which loads the extension from the workspace folder; `.vscode/` is gitignored, the README shows the config). The extension entry point is `dist/extension.cjs`, so **you must build (or watch) before launching** — VS Code loads bundled output, not `src/`.
 
 ## Build architecture
 
@@ -55,6 +55,7 @@ Consequences when editing `.jsx` files (`BabylonEditor.jsx`):
 
 ## Runtime data flow
 
+- **Content Security Policy**: every editor webview page (`BabylonEditor._getHtmlForWebview`, `contentSecurityPolicy`) allows scripts only with the page's `nonce` plus `'wasm-unsafe-eval'` and `https://cdn.babylonjs.com` (Babylon's Draco / meshopt / KTX2 decoders, loaded into blob workers), styles from the webview resource origin and inline, images / fetches / media from the resource origin, `data:` and `blob:` (and the CDN), workers from `blob:` and the CDN. A new `<script>` needs `nonce={nonce}`; a resource from another origin must be added to the policy. The splat loader would load `fflate` from unpkg.com: the bundled copy is set as `window.fflate` in `src/editor.js`.
 - **Custom editor (extension host → webview)**: the HTML injects only metadata, `window.payload = { type, mimeType, fileName, rootUrl }`, where `rootUrl` is the webview URI of the model folder (relative textures/`.bin`/`.mtl` resolve against it; the workspace folder is in `localResourceRoots`). The model bytes are sent by `postMessage` as `{ type: 'loadModel', data: ArrayBuffer }` in reply to the webview's `{ type: 'ready' }`, and as `{ type: 'reloadModel', data }` on revert. `src/editor.js` wraps the bytes in a `File` named `fileName` (the `.babylon` loader cannot read an `ArrayBufferView`) and loads it with `LoadAssetContainerAsync`.
 - **Host services**: `WebviewFiles` (`src/components/WebviewFiles.js`, set up by `setupWebview` for every editor webview) answers `saveFile` / `openFile` (dialogs starting in the model folder), `readClipboard` / `writeClipboard` (text, `vscode.env.clipboard`) and `showMessage` with `{ type: 'hostReply', requestId, result | error }`; images are written to the clipboard by the webview (`navigator.clipboard`, PNG only), clipboard images are read there too, falling back to the text read by the host.
 - **Model tree (Explorer)**: `src/components/ModelTreeProvider.js` is a `TreeDataProvider` on the host; the data stays in the webview. Sections only expand; model objects run `babylon-editor.tree.click` (a click on the shown item goes back to the file view, `{ type: 'treeSelect', id: null }`; the inspector header has a back button; both clear the tree selection with `list.clear`, focusing the tree first for the back button — the API has no deselect; `getParent` supports `TreeView.reveal`). The context menu (`contextValue` `section:<name>` / `item:<kind>`) has Add… on sections and Rename… / Delete on objects: the host asks for the type, name, image or confirmation and sends `{ type: 'treeCommand', op, … }`; `ModelEdits` (`src/editor/ModelEdits.js`) does the edit — `.babylon`: renames are patches, add / delete are `{ type: 'documentOps', ops }` (array items inserted / removed, references cleared) written by `BabylonTextEditor._writeOps` as one undo step, then the model reloads; other formats: undoable scene commands. Changed items are decorated like changed files (`resourceUri` with the `babylon-tree` scheme and a `FileDecorationProvider`: M / A): for `.babylon` the host compares the object with the saved file by id (`BabylonTextEditor._changeState`), other formats mark changed objects in the webview until saved (`documentSaved`). The host requests children with `{ type: 'treeRequest', requestId, parentId }` (null for roots) and the webview answers `{ type: 'treeItems', requestId, items }`; selection is sent as `{ type: 'treeSelect', id }`. The webview posts `treeReset` after loading a model and `treeChanged` after edits/undo/redo; the provider refreshes only for the active editor panel (the last active one while it stays visible).
@@ -80,7 +81,7 @@ Consequences when editing `.jsx` files (`BabylonEditor.jsx`):
 
 ## Ignored files
 
-`dist/`, `node_modules/`, `.vscode/` and `*.vsix` are gitignored.
+`dist/`, `node_modules/`, `.vscode/` (also `launch.json`) and `*.vsix` are gitignored.
 
 ## AI Coding Principles
 

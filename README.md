@@ -18,8 +18,13 @@ A Visual Studio Code extension that renders 3D model files directly inside the e
 - **Save Model As…** (Ctrl/Cmd+Shift+S) — writes the model as `.babylon`, `.glb`, `.obj` or `.stl`.
 - **View switch** — the toolbar shows the model, the inspector or both (Desktop); the player (auto-orbit, play/pause, seek slider, current clip, and the render mode: with textures, without textures or as lines) is at the top of the model view.
 - **Parts and textures** — a part of a mesh can be hidden in the 3D view (eye button in the Parts list; the file is not changed); material texture slots are picked from the model's textures; the texture inspector shows a preview of the image.
-- **Saving** — `.babylon` documents are saved as their text. `.ply`, `.splat` and `.spz` are view-only for now.
-- **Local resource resolution** — external resources referenced by a model (textures, `.bin` buffers) are loaded through the VS Code filesystem, so multi-file glTF scenes work out of the box.
+- **Texture image menu** — click (or right-click) the texture preview for its commands:
+  - **Save to disk…** — writes the image as a file (an embedded base64 image is decoded to its bytes; an image that exists only on the GPU, e.g. of a glTF buffer, is saved as PNG);
+  - **Replace from disk…** / **Paste from clipboard** — replaces the image with a PNG, JPEG, WebP, GIF or BMP file, or with an image, a data url or bare base64 from the clipboard; the new image is stretched to the size of the texture and written in its type. In a `.babylon` document it is embedded as `base64String` in every material that uses the texture (one undo step; an external image file is not changed);
+  - **Copy image** (as PNG) and **Copy base64** (as a `data:image/…;base64,…` url).
+- **UV layout** — **Show UV layout** in the same menu lays the triangles of the meshes that use the texture over the preview and shades the areas no triangle maps; the line color is picked next to it (cyan, inverted cyan or any color). **Copy UV layout** copies that image as a PNG of the texture size with a transparent background, to lay over the texture in an image editor. Whether the layout is shown and its color are kept between sessions. The texture transform (scale, offset, rotation) is not applied; triangles of a repeated texture are moved into the first tile.
+- **Saving** — `.babylon` documents are saved as their text. `.gltf` / `.gltf2` cannot be written back (use **Save Model As…**); `.ply`, `.splat` and `.spz` are view-only for now. A model too large to edit as text (over ~48 MB as `.babylon`) opens in the binary editor instead, which regenerates the file on save.
+- **Local resource resolution** — external resources referenced by a model (textures, `.bin` buffers, `.mtl` files) are loaded from the model folder through the webview (the workspace folder is a local resource root), so multi-file glTF scenes and relative paths like `../textures/a.png` work out of the box.
 
 ### Supported formats
 
@@ -34,7 +39,7 @@ A Visual Studio Code extension that renders 3D model files directly inside the e
 ## Requirements
 
 - Visual Studio Code `^1.107.0`
-- Node.js (with `npm`) to build the extension from source
+- Node.js (with `npm`) to build and package the extension from source
 
 ## Getting started (development)
 
@@ -45,7 +50,23 @@ npm install        # install dependencies
 npm run watch      # build once, then rebuild on change (esbuild + sass)
 ```
 
-Then press **F5** in VS Code to launch the "Run Extension" configuration. This opens a second VS Code window (the Extension Development Host) with the extension loaded. In that window:
+Then press **F5** in VS Code to launch the "Run Extension" configuration (`.vscode/` is not in the repository; create `.vscode/launch.json` once):
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"]
+    }
+  ]
+}
+```
+
+This opens a second VS Code window (the Extension Development Host) with the extension loaded. In that window:
 
 - open any supported model file → it opens in the **Babylon Editor** custom editor.
 
@@ -54,6 +75,15 @@ For a one-off production build without watchers:
 ```bash
 npm run build      # clean → bundle extension + webview + css → copy codicons and assets into dist/
 ```
+
+## Packaging and installing
+
+```bash
+npm install        # also installs @vscode/vsce (a dev dependency)
+npm run package    # runs npm run build, then packs babylon-editor-<version>.vsix into the project folder
+```
+
+Install the package in VS Code with **Extensions: Install from VSIX…** (Command Palette, the `…` menu of the Extensions view, or right-click the `.vsix` in the Explorer → **Install Extension VSIX**), then run **Developer: Reload Window**. Raise `version` in `package.json` before packaging an update.
 
 > **Note:** viewing happens entirely inside VS Code webviews — there is no HTTP server or standalone browser mode. To inspect a model outside VS Code, use a hosted viewer such as the [Babylon.js Sandbox](https://sandbox.babylonjs.com/).
 
@@ -68,24 +98,34 @@ Source is authored as **ESM** and bundled with **esbuild** into two targets, eac
 
 Key pieces:
 
-- **`BabylonDocument`** wraps the raw file bytes and derives the file type, MIME type (magic-byte sniffing), and an exact copy of the bytes for the webview.
-- **`VSCodeFSProvider`** implements Babylon's `IOfflineProvider` over `vscode.workspace.fs`, intended to let Babylon resolve external model resources through the VS Code filesystem (not wired in yet).
+- **The text is the document (`.babylon`)** — `BabylonTextEditor` is a custom text editor: the raw `TextDocument` is the only state. A 3D edit is turned into patches of the values it changed (`BabylonJsonBinding`), written in place into the text through the JSON index of the document (`JsonIndex`) as one undo step; a text change is applied to the model in place, or reloads it when the structure changed. The compact view (`BabylonTextProvider`, `collapseBabylon`) is a live projection of the same text.
+- **Converted models** — `ConvertedModels` serves `.glb`, `.gltf`, `.obj` and `.stl` files as `.babylon` documents (`babylon-model:` scheme): reading converts the model, saving converts it back. Conversions, exports and the save check run in a webview (`WebviewTasks`, `ModelConverter`), because they need the Babylon engine.
+- **`BabylonDocument`** wraps the raw file bytes of the binary editor (view-only formats and very large models) and derives the file type, MIME type (magic-byte sniffing), and an exact copy of the bytes for the webview.
+- **Host services** — `WebviewFiles` gives the webviews file dialogs, the text clipboard and notifications (`HostRequests` on the webview side).
+- **`VSCodeFSProvider`** implements Babylon's `IOfflineProvider` over `vscode.workspace.fs`; it is not wired in (it imports `vscode`, so it cannot run in the webview).
+- **Content Security Policy** — the webview pages run only their own scripts (by nonce) and Babylon's decoders from `cdn.babylonjs.com` (needed for Draco / meshopt / KTX2 compressed glTF); everything else is loaded from the extension and the model folder.
 - The webview HTML is generated by a small **custom JSX runtime** (`src/utils/jsx-runtime.js`) that renders JSX to HTML strings — this project does **not** use React.
 
-The webview receives file metadata via an injected `window.payload` object and the model bytes via `postMessage` (sent once the webview reports it is ready). Relative resources (textures, `.bin`, `.mtl`) are loaded from the workspace folder.
+The webview receives file metadata via an injected `window.payload` object and the model bytes via `postMessage` (sent once the webview reports it is ready). Relative resources (textures, `.bin`, `.mtl`) are loaded from the model folder through its webview URI (`payload.rootUrl`).
 
 ## Project layout
 
 ```
 src/
   extension.js              # extension entry point (activate / commands)
-  editor.js                 # editor webview entry (@babylonjs/core): scene, modes, model loading
-  editor/                   # UI widgets (Toolbar, PropertyPanel, DataTable, CurveTable, PanelResizer, EditHistory, ModelTreeBridge) and
-                            # model logic (AnimationController, CameraController, SelectionHighlighter, SkeletonView,
-                            # ModelOutline, ModelProperties, ClipFrameEditor, ModelSerializer)
-  components/               # BabylonEditor, BabylonDocument, ModelTreeProvider (Explorer view), VSCodeFSProvider
-  utils/                    # parsers (glb/babylon/obj) + mime/extension/base64 helpers + jsx-runtime
+  editor.js                 # editor webview entry (@babylonjs/core): scene, views, model loading, host messages
+  editor/                   # webview modules:
+                            #   UI widgets: Toolbar, PropertyPanel, DataTable, CurveTable, PanelResizer, PopupMenu,
+                            #   EditHistory (+ DocumentEditHistory), ModelTreeBridge, HostRequests
+                            #   model logic: AnimationController, CameraController, SelectionHighlighter, SkeletonView,
+                            #   ModelOutline, ModelProperties, ClipFrameEditor, ModelEdits, ModelSerializer, ModelConverter,
+                            #   BabylonJsonBinding, BabylonFileSchema, FileInfo, TextureImage, UvLayout
+  components/               # extension host: BabylonEditor (binary editor, webview setup), BabylonTextEditor (.babylon),
+                            # BabylonTextProvider (compact view), ConvertedModels, JsonDocuments, ModelTreeProvider
+                            # (Explorer view), WebviewTasks, WebviewFiles, BabylonDocument, VSCodeFSProvider
+  utils/                    # parsers (glb/babylon/obj), JsonIndex, collapseBabylon, mime/extension/base64 helpers, jsx-runtime
   scss/                     # editor.scss → compiled to dist/css/
+resources/                  # icon of the "Open in Babylon Editor" title button (light / dark)
 dist/                       # bundled output loaded by VS Code (git-ignored)
 ```
 
@@ -95,6 +135,7 @@ dist/                       # bundled output loaded by VS Code (git-ignored)
 | --- | --- |
 | `npm run build` | Full production build into `dist/` |
 | `npm run watch` | Build once, then run all esbuild/sass watchers concurrently |
+| `npm run package` | Build, then pack the extension into a `.vsix` |
 | `build:js` / `build:js-editor` / `build:css` | Rebuild a single target |
 
 ## License
