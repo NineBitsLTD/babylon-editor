@@ -89,14 +89,29 @@ export class ModelConverter {
             ModelConverter._nameObjects(container);
             ModelConverter._dropGroupAnimations(container);
             ModelConverter._nameTextures(container, rootUrl);
-            const json = await ModelSerializer.withModelOnly(scene, container, () => BABYLON.SceneSerializer.Serialize(scene));
-            ModelConverter._clean(json);
-            if (producer) json.producer = producer;
-            const text = JSON.stringify(json, (key, value) => (typeof value === 'number' ? float32(value) : value));
-            return { text: formatJson(text, '  ', '', INLINE_OBJECT_LENGTH), source: ModelSerializer.inspectSource(type, data) };
+            const text = await ModelConverter.writeBabylon({ scene, container, producer });
+            return { text, source: ModelSerializer.inspectSource(type, data) };
         } finally {
             scene.dispose();
         }
+    }
+
+    /**
+     * The model of a scene as a `.babylon` document, written the way conversions write it: only the
+     * model, without default-material references and texture urls, numbers as the shortest decimals
+     * of their 32-bit floats, small objects (keys) on one line. Names and ids are taken as they are.
+     * @param {object} options
+     * @param {BABYLON.Scene} options.scene
+     * @param {BABYLON.AssetContainer} options.container the model
+     * @param {object} [options.producer] the `producer` value of the document
+     * @returns {Promise<string>}
+     */
+    static async writeBabylon({ scene, container, producer }) {
+        const json = await ModelSerializer.withModelOnly(scene, container, () => BABYLON.SceneSerializer.Serialize(scene));
+        ModelConverter._clean(json);
+        if (producer) json.producer = producer;
+        const text = JSON.stringify(json, (key, value) => (typeof value === 'number' ? float32(value) : value));
+        return formatJson(text, '  ', '', INLINE_OBJECT_LENGTH);
     }
 
     /**

@@ -17,6 +17,13 @@ import * as vscode from 'vscode';
 const CONVERTIBLE_TYPES = ['glb', 'gltf', 'gltf2', 'obj', 'stl'];
 /** Formats a converted document is saved back into; the others are only converted (Save As). */
 const WRITABLE_TYPES = ['glb', 'obj', 'stl'];
+/** Formats of Save Model As: extension and the label of the file dialog filter. */
+const SAVE_AS_FORMATS = [
+    ['babylon', 'Babylon'],
+    ['glb', 'glTF binary'],
+    ['obj', 'Wavefront OBJ'],
+    ['stl', 'STL'],
+];
 /** What a format cannot hold, shown before the first save into it. */
 const FORMAT_LOSSES = {
     glb: 'Transforms of skinned meshes are ignored and data the glTF exporter does not support is dropped.',
@@ -226,6 +233,46 @@ export class ConvertedModels {
         await vscode.workspace.fs.writeFile(entry.original, bytes);
         entry.data = content;
         entry.mtime = Date.now();
+    }
+
+    /**
+     * @param {vscode.Uri} target a file to save a model into
+     * @returns {string} its format (extension without the dot)
+     * @throws when the extension is not a format a model can be saved as
+     */
+    static saveAsType(target) {
+        const type = target.path.split('.').pop().toLowerCase();
+        if (!SAVE_AS_FORMATS.some(([candidate]) => candidate === type)) {
+            throw new Error(`Choose one of the formats: ${SAVE_AS_FORMATS.map(([candidate]) => `.${candidate}`).join(', ')}`);
+        }
+        return type;
+    }
+
+    /**
+     * Save Model As…: asks for a file of a model format (the format of the model first), confirms
+     * what the format drops, writes the model converted by `convert` and offers to open the file.
+     * @param {vscode.Uri} model the model file (the dialog starts with it)
+     * @param {(type: string) => Promise<Uint8Array>} convert the model in a format
+     */
+    async saveModelAs(model, convert) {
+        const current = model.path.split('.').pop().toLowerCase();
+        const formats = SAVE_AS_FORMATS.filter(([type]) => type === current).concat(SAVE_AS_FORMATS.filter(([type]) => type !== current));
+        const target = await vscode.window.showSaveDialog({
+            title: 'Save the model as',
+            defaultUri: model,
+            filters: Object.fromEntries(formats.map(([type, label]) => [label, [type]])),
+        });
+        if (!target) return;
+        const type = ConvertedModels.saveAsType(target);
+        const name = target.path.split('/').pop();
+        if (!(await this.confirmFormat(type, name))) return;
+        const data = await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Window, title: `Saving ${name}…` },
+            () => convert(type),
+        );
+        await vscode.workspace.fs.writeFile(target, data);
+        const open = 'Open';
+        if (await vscode.window.showInformationMessage(`Saved ${name}.`, open) === open) await vscode.commands.executeCommand('vscode.open', target);
     }
 
     /**

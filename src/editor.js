@@ -612,10 +612,12 @@ class Editor {
     }
 
     /**
-     * Regenerates the file content from the scene in the original format.
+     * Regenerates the file content from the scene, in the original format or another one (Save As).
+     * @param {string} [format] extension of the format to write (babylon, glb, obj, stl)
+     * @param {object} [producer] the `producer` value of a written `.babylon` document
      * @returns {Promise<ArrayBuffer>}
      */
-    async serialize() {
+    async serialize(format = this._type, producer = undefined) {
         if (!this._container) throw new Error('No model is loaded');
         // Highlight helpers (outlines, bones, markers) and hidden meshes must not end up in the file
         const selectedBone = this._highlighter.selectedBone;
@@ -624,12 +626,16 @@ class Editor {
         const hidden = [...this._hiddenInView.keys()];
         hidden.forEach(mesh => this._setHiddenInView(mesh, false));
         try {
-            return await ModelSerializer.serialize({
-                type: this._type,
-                scene: this._scene,
-                container: this._container,
-                source: this._source,
-            });
+            if (format === 'babylon') {
+                const text = await ModelConverter.writeBabylon({ scene: this._scene, container: this._container, producer });
+                return new TextEncoder().encode(text).buffer;
+            }
+            // An OBJ keeps referring to the material library of the source OBJ; an STL keeps its encoding
+            const source = {
+                mtllib: format === 'obj' && this._type === 'obj' ? this._source?.mtllib ?? null : null,
+                binaryStl: this._type === 'stl' ? this._source?.binaryStl ?? true : true,
+            };
+            return await ModelSerializer.serialize({ type: format, scene: this._scene, container: this._container, source });
         } finally {
             hidden.forEach(mesh => this._setHiddenInView(mesh, true));
             if (this._selection) {
@@ -951,7 +957,7 @@ class Editor {
                     break;
                 case 'getFileData':
                     try {
-                        const data = await this.serialize();
+                        const data = await this.serialize(message.format, message.producer);
                         vscode.postMessage({ type: 'fileData', requestId: message.requestId, data });
                     } catch (error) {
                         console.error('[BabylonEditor] Failed to serialize model', error);

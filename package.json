@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -121,7 +121,7 @@
         "command": "babylon-editor.saveAs",
         "key": "ctrl+shift+s",
         "mac": "cmd+shift+s",
-        "when": "resourceExtname == .babylon"
+        "when": "resourceExtname == .babylon || activeCustomEditorId == babylon-editor.editor"
       }
     ],
     "configuration": {
@@ -136,6 +136,11 @@
     },
     "menus": {
       "editor/title": [
+        {
+          "command": "babylon-editor.saveAs",
+          "when": "activeCustomEditorId == babylon-editor.editor || activeCustomEditorId == babylon-editor.textEditor || (resourceScheme == file || resourceScheme == babylon-model || resourceScheme == babylon-text) && resourceExtname == .babylon",
+          "group": "1_save@1"
+        },
         {
           "command": "babylon-editor.openInModelEditor",
           "when": "resourceScheme == babylon-text || (resourceScheme == file || resourceScheme == babylon-model) && resourceExtname =~ /^\\.(babylon|glb|gltf|gltf2|obj|stl|ply|splat|spz)$/i && !activeCustomEditorId",

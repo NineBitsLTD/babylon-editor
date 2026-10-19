@@ -109,6 +109,21 @@ export class BabylonEditor {
         this._tasks = tasks;
         this._modelEditorId = modelEditorId;
     }
+
+    /** View type of this editor (its tabs are `TabInputCustom`s with it). */
+    get viewType() {
+        return BabylonEditorID;
+    }
+
+    /**
+     * Save Model As… for a model shown by this editor: writes it, as edited, in the chosen format.
+     * @param {vscode.Uri} uri the model file
+     */
+    async saveModelAs(uri) {
+        const document = this._openDocuments.get(uri.toString());
+        if (!document) throw new Error('The editor of this model is closed');
+        await this._converted.saveModelAs(uri, type => this._requestFileData(document, type));
+    }
     
     /**
      * Обязательный метод: Открытие документа.
@@ -237,11 +252,12 @@ export class BabylonEditor {
     }
 
     /**
-     * Asks the webview to serialize the edited model in the document format.
+     * Asks the webview to serialize the edited model, in the document format or another one.
      * @param {BabylonDocument} document
+     * @param {string} [format] extension of the format to write (the webview writes the document's by default)
      * @returns {Promise<Uint8Array>}
      */
-    _requestFileData(document) {
+    _requestFileData(document, format = undefined) {
         const webviewPanel = this._webviewPanels.get(document.uri.toString());
         if (!webviewPanel) {
             return Promise.reject(new Error('The editor of this document is closed'));
@@ -249,7 +265,10 @@ export class BabylonEditor {
         const requestId = ++this._nextRequestId;
         return new Promise((resolve, reject) => {
             this._pendingRequests.set(requestId, { resolve, reject });
-            webviewPanel.webview.postMessage({ type: 'getFileData', requestId });
+            // A written .babylon document names the model file it was made from, like a conversion
+            const version = this._context.extension.packageJSON.version ?? '';
+            const producer = { name: 'Babylon Editor', version, exporter_version: version, file: document.uri.path.split('/').pop() };
+            webviewPanel.webview.postMessage({ type: 'getFileData', requestId, format, producer });
         });
     }
 
@@ -308,7 +327,12 @@ export class BabylonEditor {
      * @returns {Promise<void>}
      */
     async saveCustomDocumentAs(document, destination, token) {
-        const data = await this._requestFileData(document);
+        // The format follows the extension of the chosen file (e.g. a .glb saved as .babylon)
+        const type = ConvertedModels.saveAsType(destination);
+        if (type !== document.type && this._converted && !(await this._converted.confirmFormat(type, destination.path.split('/').pop()))) {
+            throw new Error('Saving was cancelled');
+        }
+        const data = await this._requestFileData(document, type);
         await vscode.workspace.fs.writeFile(destination, data);
     }
     

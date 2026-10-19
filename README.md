@@ -15,7 +15,7 @@ A Visual Studio Code extension that renders 3D model files directly inside the e
 - **Inspector** — always shown next to the 3D view: an inspector (drag its left edge to resize, double-click to reset) with editable properties: node name/transform/material, material colors and parameters, texture UV settings, bone rest pose, clip name and frame range, bone transforms per frame (edit, delete keys) and vertex positions/normals/UVs. The selection is highlighted in the 3D view. Undo/redo and dirty state work as in any VS Code editor.
 - **One format for editing** — `.glb`, `.gltf`, `.obj` and `.stl` files are converted to a clean `.babylon` document when opened (`Street.obj.babylon`): the 3D editor, the raw text and the compact view work on it like on a `.babylon` file, and saving converts it back into the original file (`.gltf` cannot be written back: use Save Model As). Formats that cannot hold everything (OBJ and STL drop skeletons, animations, cameras and lights) are named once per session before saving.
 - **Frames** — for models whose clips are ranges of one timeline, the first item of Animations shows all frames of all bones (table and graph) and plays the whole timeline; the graph marks every clip with a colored band. **Remove empty ranges** marks the runs of frames without keys (click one to keep it, it turns dark) and **Delete** removes the marked ones, moving the following frames and clips back. **Renumber** in a clip inspector removes the frames without keys of that clip.
-- **Save Model As…** (Ctrl/Cmd+Shift+S) — writes the model as `.babylon`, `.glb`, `.obj` or `.stl`.
+- **Save Model As…** (Ctrl/Cmd+Shift+S, or the `…` menu of the editor title) — writes the model as `.babylon`, `.glb`, `.obj` or `.stl`, in every Babylon editor (also for models opened without conversion, e.g. very large ones). VS Code's own **File → Save As…** of such a model follows the extension of the chosen file too.
 - **View switch** — the toolbar shows the model, the inspector or both (Desktop); the player (auto-orbit, play/pause, seek slider, current clip, and the render mode: with textures, without textures or as lines) is at the top of the model view.
 - **Parts and textures** — a part of a mesh can be hidden in the 3D view (eye button in the Parts list; the file is not changed); material texture slots are picked from the model's textures; the texture inspector shows a preview of the image.
 - **Texture image menu** — click (or right-click) the texture preview for its commands:
@@ -140,4 +140,4 @@ dist/                       # bundled output loaded by VS Code (git-ignored)
 
 ## License
 
-[MIT](LICENSE) © 2026 NineBits LLC
+MIT © 2026 NineBits LLC — see the `LICENSE` file.

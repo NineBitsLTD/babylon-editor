@@ -33,14 +33,6 @@ function findItem(index, text, { array, key, id, field }) {
     return null;
 }
 
-/** Formats of Save As: extension and the label of the file dialog filter. */
-const SAVE_AS_FORMATS = [
-    ['babylon', 'Babylon'],
-    ['glb', 'glTF binary'],
-    ['obj', 'Wavefront OBJ'],
-    ['stl', 'STL'],
-];
-
 /** Text changes (typing) are sent to the 3D views after this pause. */
 const PATCH_DELAY = 150;
 /** Changes that cannot be patched reload the model after this pause (if the text is valid JSON). */
@@ -212,38 +204,21 @@ export class BabylonTextEditor {
     /**
      * Saves the model of the active `.babylon` document (3D, raw or compact view) into a file of a
      * format the user chooses (`.babylon`, `.glb`, `.obj`, `.stl`), converting it in a webview.
-     * The document itself stays as it is. Bound to Ctrl/Cmd+Shift+S in these editors.
+     * The document itself stays as it is. For a model shown by the binary editor the editor writes
+     * it. Bound to Ctrl/Cmd+Shift+S in these editors.
      */
     async saveAs() {
         const active = this._activeModelText();
         if (!active) {
+            // A model in the binary editor (a view-only format, or too large to edit as text)
+            const binary = this._activeBinaryModel();
+            if (binary) return this._webviews.saveModelAs(binary);
             await vscode.commands.executeCommand('workbench.action.files.saveAs');
             return;
         }
         const { real, text } = active;
         if (text === null) throw new Error('The compact view has placeholders that cannot be restored: save the raw text instead');
-        const model = ConvertedModels.toOriginalUri(real) ?? real;
-        const current = model.path.split('.').pop().toLowerCase();
-        const formats = SAVE_AS_FORMATS.filter(([type]) => type === current).concat(SAVE_AS_FORMATS.filter(([type]) => type !== current));
-        const target = await vscode.window.showSaveDialog({
-            title: 'Save the model as',
-            defaultUri: model,
-            filters: Object.fromEntries(formats.map(([type, label]) => [label, [type]])),
-        });
-        if (!target) return;
-        const type = target.path.split('.').pop().toLowerCase();
-        if (!SAVE_AS_FORMATS.some(([candidate]) => candidate === type)) {
-            throw new Error(`Choose one of the formats: ${SAVE_AS_FORMATS.map(([candidate]) => `.${candidate}`).join(', ')}`);
-        }
-        const name = target.path.split('/').pop();
-        if (!(await this._converted.confirmFormat(type, name))) return;
-        const data = await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Window, title: `Saving ${name}…` },
-            () => this._converted.export(real, new TextEncoder().encode(text), type),
-        );
-        await vscode.workspace.fs.writeFile(target, data);
-        const open = 'Open';
-        if (await vscode.window.showInformationMessage(`Saved ${name}.`, open) === open) await vscode.commands.executeCommand('vscode.open', target);
+        await this._converted.saveModelAs(ConvertedModels.toOriginalUri(real) ?? real, type => this._converted.export(real, new TextEncoder().encode(text), type));
     }
 
     /**
@@ -261,6 +236,14 @@ export class BabylonTextEditor {
             real: compact ? BabylonTextProvider.toRealUri(document.uri) : document.uri,
             text: compact ? this._textProvider.restoredText(document) : document.getText(),
         };
+    }
+
+    /**
+     * @returns {vscode.Uri | null} the model file of the active tab when the binary editor shows it
+     */
+    _activeBinaryModel() {
+        const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+        return input instanceof vscode.TabInputCustom && input.viewType === this._webviews.viewType ? input.uri : null;
     }
 
     /**
