@@ -1,0 +1,973 @@
+import * as BABYLON from '@babylonjs/core';
+import { BABYLON_FILE_SCHEMA, MATERIAL_TEXTURE_SLOTS, schemaProperties } from './BabylonFileSchema';
+import { ClipFrameEditor } from './ClipFrameEditor';
+import { textureLabel, triangleCount } from './ModelOutline';
+import { texturePreview } from './TextureImage';
+
+/**
+ * @typedef {object} PropertiesContext
+ * @property {string} fileType extension of the edited file, without the dot
+ * @property {BABYLON.AssetContainer} container
+ * @property {import('./AnimationController').AnimationController} animations
+ * @property {import('./SelectionHighlighter').SelectionHighlighter} highlighter
+ * @property {import('./EditHistory').EditHistory} history
+ * @property {(index: number) => void} selectClip makes a clip current without changing play/pause
+ * @property {(clip: number | import('./AnimationController').AnimationClip) => void} playClip makes a clip
+ *   (by index, or the clip itself, e.g. the whole timeline) current and plays it from the start
+ * @property {() => void} pauseAnimation pauses the current clip
+ * @property {(skeleton: BABYLON.Skeleton, pose: 'rest' | 'bind') => void} showPose stops playback and auto-orbit, shows the pose
+ * @property {(skeleton: BABYLON.Skeleton, pose: 'rest' | 'bind') => boolean} isPose nothing plays or orbits and the bones are in the pose
+ * @property {(clip: import('./AnimationController').AnimationClip, frame: number) => void} showFrame pauses on a frame of a clip
+ * @property {() => number} selectedRow selected row of the inspector table, or -1
+ * @property {string} fileName
+ * @property {import('./FileInfo').FileField[] | null} fileFields read-only fields of a binary file
+ * @property {import('./BabylonJsonBinding').DocumentField[] | null} documentFields editable top-level values of a .babylon text
+ * @property {import('./BabylonJsonBinding').BabylonJsonBinding | null} binding the document binding of a .babylon text (null for other formats)
+ * @property {(mesh: BABYLON.AbstractMesh) => boolean} isHiddenInView whether a mesh is hidden in the 3D view only
+ * @property {(mesh: BABYLON.AbstractMesh, hidden: boolean) => void} setHiddenInView hides a mesh in the 3D view
+ *   without changing the model (the file keeps it as it is)
+ * @property {string | null} convertedFrom name of the model file a converted `.babylon` document is edited for
+ * @property {(data: ModelItemData) => void} openObject shows an object listed in the inspector (a child node, a part, a
+ *   texture of a material) in its own inspector; back returns to the current one
+ * @property {(op: 'rename' | 'delete', data: ModelItemData) => void} objectCommand runs a command of the tree context menu
+ *   on a listed object (the host asks for the name / the confirmation)
+ * @property {import('./TextureImage').TextureImage} textureImage commands of the image of a texture
+ */
+
+/** @typedef {import('./PropertyPanel').PropertyDescriptor} PropertyDescriptor */
+/** @typedef {import('./PropertyPanel').PanelContent} PanelContent */
+/** @typedef {import('./ModelOutline').ModelItemData} ModelItemData */
+
+const RAD_TO_DEG = 180 / Math.PI;
+const DEG_TO_RAD = Math.PI / 180;
+
+// --- Generic property builders -------------------------------------------------------------
+
+/**
+ * @param {object} target
+ * @param {string} key
+ * @param {string} [label]
+ * @returns {PropertyDescriptor}
+ */
+function textProperty(target, key, label = 'Name') {
+    return { label, type: 'text', get: () => target[key], set: (value) => { target[key] = value; } };
+}
+
+/**
+ * @param {object} target
+ * @param {string} key
+ * @param {string} label
+ * @param {boolean} [nullable]
+ * @returns {PropertyDescriptor}
+ */
+function numberProperty(target, key, label, nullable = false) {
+    return { label, type: 'number', nullable, get: () => target[key], set: (value) => { target[key] = value; } };
+}
+
+/**
+ * @param {object} target
+ * @param {string} key
+ * @param {string} label
+ * @returns {PropertyDescriptor}
+ */
+function booleanProperty(target, key, label) {
+    return { label, type: 'boolean', get: () => target[key], set: (value) => { target[key] = value; } };
+}
+
+/**
+ * Color3 property edited as a hex string; skipped when the color is not set.
+ * @param {object} target
+ * @param {string} key
+ * @param {string} label
+ * @returns {PropertyDescriptor[]}
+ */
+function colorProperty(target, key, label) {
+    if (!(target[key] instanceof BABYLON.Color3)) return [];
+    return [{
+        label,
+        type: 'color',
+        get: () => target[key].toHexString(),
+        set: (value) => { target[key] = BABYLON.Color3.FromHexString(value); },
+    }];
+}
+
+/**
+ * @param {string} label
+ * @param {() => BABYLON.Vector3} vector returns the live vector
+ * @returns {PropertyDescriptor}
+ */
+function vectorProperty(label, vector) {
+    return {
+        label,
+        type: 'vector',
+        get: () => vector().asArray(),
+        set: (value) => vector().fromArray(value),
+    };
+}
+
+/**
+ * @param {string} label
+ * @param {() => any} get
+ * @returns {PropertyDescriptor}
+ */
+function readonlyProperty(label, get) {
+    return { label, type: 'readonly', get };
+}
+
+/**
+ * Inspector property of a top-level value of a `.babylon` document (producer, clearColor, …).
+ * Fields of the format the file does not have show Babylon's default and are added when set.
+ * @param {import('./BabylonJsonBinding').DocumentField} field
+ * @param {string} [label] defaults to the path
+ * @returns {PropertyDescriptor}
+ */
+function documentProperty(field, label = field.path.join('.')) {
+    const { schema } = field;
+    if (!field.set) return readonlyProperty(label, () => String(field.get()));
+    const current = () => field.get() ?? schema?.default ?? null;
+    const value = current();
+    const type = schema?.type ?? (Array.isArray(value) ? 'vector3' : typeof value);
+    const base = { label, isUnset: () => field.get() === undefined };
+    const set = value => field.set(value);
+    switch (type) {
+        case 'boolean':
+            return { ...base, type: 'boolean', get: () => !!current(), set };
+        case 'number':
+            return { ...base, type: 'number', get: current, set };
+        case 'string':
+            return { ...base, type: 'text', get: () => current() ?? '', set };
+        case 'enum':
+            return {
+                ...base,
+                type: 'select',
+                options: () => schema.options.map(option => ({ value: String(option.value), label: option.label })),
+                get: () => String(current()),
+                set: next => set(schema.options.find(option => String(option.value) === next)?.value ?? next),
+            };
+        case 'color3':
+            return {
+                ...base,
+                type: 'color',
+                get: () => BABYLON.Color3.FromArray(current()).toHexString(),
+                // An alpha the file has (clearColor may be RGBA) is kept
+                set: hex => set([...BABYLON.Color3.FromHexString(hex).asArray(), ...(current().length > 3 ? [current()[3]] : [])]),
+            };
+        case 'vector3': {
+            if (!Array.isArray(value)) return readonlyProperty(label, () => String(field.get()));
+            const color = /color/i.test(label);
+            const components = (color ? ['R', 'G', 'B', 'A'] : ['X', 'Y', 'Z', 'W']).slice(0, value.length);
+            return { ...base, type: 'vector', components, get: current, set };
+        }
+        default:
+            return readonlyProperty(label, () => String(field.get()));
+    }
+}
+
+/**
+ * Euler rotation in degrees for a node that may use either `rotation` or `rotationQuaternion`.
+ * Undo restores the exact original quaternion instead of a round-tripped Euler value.
+ * @param {BABYLON.TransformNode} node
+ * @returns {PropertyDescriptor}
+ */
+function nodeRotationProperty(node) {
+    return {
+        label: 'Rotation°',
+        type: 'vector',
+        get: () => (node.rotationQuaternion ? node.rotationQuaternion.toEulerAngles() : node.rotation).asArray().map(value => value * RAD_TO_DEG),
+        set: (value) => {
+            const [x, y, z] = value.map(degrees => degrees * DEG_TO_RAD);
+            if (node.rotationQuaternion) {
+                node.rotationQuaternion = BABYLON.Quaternion.FromEulerAngles(x, y, z);
+            } else {
+                node.rotation.set(x, y, z);
+            }
+        },
+        capture: () => ({ euler: node.rotation.clone(), quaternion: node.rotationQuaternion?.clone() ?? null }),
+        restore: (state) => {
+            node.rotation.copyFrom(state.euler);
+            node.rotationQuaternion = state.quaternion?.clone() ?? null;
+        },
+    };
+}
+
+// --- Bone rest pose ------------------------------------------------------------------------
+
+/**
+ * @param {BABYLON.Bone} bone
+ * @returns {{ scaling: BABYLON.Vector3, rotation: BABYLON.Quaternion, position: BABYLON.Vector3 }}
+ */
+function decomposeRest(bone) {
+    const scaling = new BABYLON.Vector3();
+    const rotation = new BABYLON.Quaternion();
+    const position = new BABYLON.Vector3();
+    bone.getRestMatrix().decompose(scaling, rotation, position);
+    return { scaling, rotation, position };
+}
+
+/**
+ * @param {BABYLON.Bone} bone
+ * @param {BABYLON.Matrix} matrix
+ * @param {import('./AnimationController').AnimationController} animations
+ */
+function restoreRest(bone, matrix, animations) {
+    bone.setRestMatrix(matrix.clone());
+    // The rest pose is shown at once while no animation is playing
+    if (!animations.isPlaying) bone.returnToRest();
+}
+
+/**
+ * @param {BABYLON.Bone} bone
+ * @param {{ scaling: BABYLON.Vector3, rotation: BABYLON.Quaternion, position: BABYLON.Vector3 }} parts
+ * @param {import('./AnimationController').AnimationController} animations
+ */
+function composeRest(bone, { scaling, rotation, position }, animations) {
+    restoreRest(bone, BABYLON.Matrix.Compose(scaling, rotation, position), animations);
+}
+
+/**
+ * A local matrix as 9 table values: position, rotation in degrees, scaling.
+ * @param {BABYLON.Matrix} matrix
+ * @returns {number[]}
+ */
+function matrixValues(matrix) {
+    const scaling = new BABYLON.Vector3(), rotation = new BABYLON.Quaternion(), position = new BABYLON.Vector3();
+    matrix.decompose(scaling, rotation, position);
+    return [...position.asArray(), ...rotation.toEulerAngles().asArray().map(value => value * RAD_TO_DEG), ...scaling.asArray()];
+}
+
+/**
+ * Inverse of matrixValues.
+ * @param {number[]} values position, rotation in degrees, scaling
+ * @returns {BABYLON.Matrix}
+ */
+function composeValues(values) {
+    return BABYLON.Matrix.Compose(
+        BABYLON.Vector3.FromArray(values, 6),
+        BABYLON.Quaternion.FromEulerAngles(...values.slice(3, 6).map(degrees => degrees * DEG_TO_RAD)),
+        BABYLON.Vector3.FromArray(values, 0),
+    );
+}
+
+/**
+ * Rest pose of a bone as 9 table values.
+ * @param {BABYLON.Bone} bone
+ * @returns {number[]}
+ */
+function readRest(bone) {
+    return matrixValues(bone.getRestMatrix());
+}
+
+/**
+ * @param {BABYLON.Bone} bone
+ * @param {number} component 0..8 (position, rotation°, scaling)
+ * @param {number} value
+ * @param {import('./AnimationController').AnimationController} animations
+ */
+function writeRest(bone, component, value, animations) {
+    const values = readRest(bone);
+    values[component] = value;
+    composeRest(bone, {
+        position: BABYLON.Vector3.FromArray(values, 0),
+        rotation: BABYLON.Quaternion.FromEulerAngles(...values.slice(3, 6).map(degrees => degrees * DEG_TO_RAD)),
+        scaling: BABYLON.Vector3.FromArray(values, 6),
+    }, animations);
+}
+
+/**
+ * Rest pose components of a bone (position, Euler rotation in degrees, scaling) built over its
+ * rest matrix. Editing the bind matrix would break skinning, so only the rest pose is editable;
+ * the change is visible while no animation drives the bone.
+ * @param {BABYLON.Bone} bone
+ * @param {import('./AnimationController').AnimationController} animations
+ * @returns {PropertyDescriptor[]}
+ */
+function boneRestProperties(bone, animations) {
+    const decompose = () => decomposeRest(bone);
+    const compose = parts => composeRest(bone, parts, animations);
+    const capture = () => bone.getRestMatrix().clone();
+    const restore = matrix => restoreRest(bone, matrix, animations);
+    const component = (label, read, write) => ({
+        label, type: 'vector', capture, restore,
+        get: () => read(decompose()),
+        set: (value) => { const parts = decompose(); write(parts, value); compose(parts); },
+    });
+    return [
+        component('Rest position', parts => parts.position.asArray(), (parts, value) => parts.position.fromArray(value)),
+        component('Rest rotation°', parts => parts.rotation.toEulerAngles().asArray().map(value => value * RAD_TO_DEG),
+            (parts, value) => { parts.rotation = BABYLON.Quaternion.FromEulerAngles(...value.map(degrees => degrees * DEG_TO_RAD)); }),
+        component('Rest scaling', parts => parts.scaling.asArray(), (parts, value) => parts.scaling.fromArray(value)),
+    ];
+}
+
+// --- Object descriptions -------------------------------------------------------------------
+
+/**
+ * Describes model objects for the inspector (properties, tables, actions) and highlights them
+ * in the 3D view. All mutations go through the descriptors, so the editor can record them.
+ */
+export class ModelProperties {
+
+    /**
+     * @param {ModelItemData} data
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static describe(data, context) {
+        const content = ModelProperties._describe(data, context);
+        const fields = ModelProperties._formatFields(data, context);
+        if (fields.length) content.properties = [...(content.properties ?? []), { label: 'Other file fields', type: 'section' }, ...fields];
+        return content;
+    }
+
+    /**
+     * Fields of the `.babylon` format for an object besides its main properties (also those the
+     * file does not have yet: they are shown dimmed and are added to the text when set).
+     * @param {ModelItemData} data
+     * @param {PropertiesContext} context
+     * @returns {PropertyDescriptor[]}
+     */
+    static _formatFields(data, { binding }) {
+        const schema = BABYLON_FILE_SCHEMA;
+        /** @type {[object, import('./BabylonFileSchema').SchemaField[]] | null} */
+        const target = (() => {
+            switch (data.kind) {
+                case 'node': return data.node instanceof BABYLON.AbstractMesh ? [data.node, schema.mesh] : null;
+                case 'material':
+                    if (data.material instanceof BABYLON.PBRMaterial) return [data.material, schema.pbrMaterial];
+                    return data.material instanceof BABYLON.StandardMaterial ? [data.material, schema.standardMaterial] : null;
+                case 'texture': return [data.texture, schema.texture];
+                case 'camera': return [data.camera, schema.camera];
+                case 'light': return [data.light, schema.light];
+                case 'shadowGenerator': return [data.generator, schema.shadowGenerator];
+                case 'skeleton': return [data.skeleton, schema.skeleton];
+                default: return null;
+            }
+        })();
+        if (!target) return [];
+        const [object, fields] = target;
+        const path = binding?.pathOf(object);
+        const isUnset = path ? field => !binding.isInDocument([...path, field.key]) : undefined;
+        return schemaProperties(object, fields, isUnset);
+    }
+
+    /**
+     * @param {ModelItemData} data
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _describe(data, context) {
+        switch (data.kind) {
+            case 'node': return ModelProperties._node(data.node, context);
+            case 'material': return ModelProperties._material(data.material, context);
+            case 'texture': return { title: 'Texture', subtitle: () => textureLabel(data.texture, context.container), properties: ModelProperties._textureProperties(data.texture, context) };
+            case 'skeleton': return ModelProperties._skeleton(data.skeleton, context);
+            case 'bone': return ModelProperties._bone(data.bone, context);
+            case 'clip': return ModelProperties._clip(data.clip, context);
+            case 'file': return ModelProperties._file(context);
+            case 'camera': return ModelProperties._camera(data.camera);
+            case 'light': return ModelProperties._light(data.light);
+            case 'shadowGenerator': return ModelProperties._shadowGenerator(data.generator);
+            default: return { title: data.name, notice: 'Expand the section to browse its items.' };
+        }
+    }
+
+    /**
+     * Shows the selected object in the 3D view.
+     * @param {ModelItemData} data
+     * @param {PropertiesContext} context
+     */
+    static highlight(data, context) {
+        const { highlighter, container } = context;
+        switch (data.kind) {
+            case 'node':
+                return highlighter.outlineMeshes(data.node instanceof BABYLON.AbstractMesh
+                    ? [data.node, ...data.node.getChildMeshes()]
+                    : data.node.getChildMeshes());
+            case 'material':
+                return highlighter.outlineMeshes(container.meshes.filter(mesh => mesh.material === data.material));
+            case 'skeleton':
+                return highlighter.showSkeleton(data.skeleton);
+            case 'bone':
+                return highlighter.showSkeleton(data.bone.getSkeleton(), data.bone);
+            case 'clip': {
+                context.showFrame(data.clip, ClipFrameEditor.shownFrame(data.clip));
+                const skeleton = ClipFrameEditor.skeletonOf(data.clip, container);
+                return skeleton ? highlighter.showSkeleton(skeleton) : highlighter.clear();
+            }
+            default:
+                return highlighter.clear();
+        }
+    }
+
+    /**
+     * @param {BABYLON.TransformNode} node
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _node(node, context) {
+        const { fileType } = context;
+        const isMesh = node instanceof BABYLON.AbstractMesh;
+        /** @type {PanelContent} */
+        const content = {
+            title: isMesh ? 'Mesh' : 'Node',
+            subtitle: () => node.name,
+            notice: ModelProperties._formatNotice(node, fileType),
+            properties: ModelProperties._nodeProperties(node, context),
+            lists: ModelProperties._nodeLists(node, context),
+        };
+        // The vertex table of a mesh is part of its inspector
+        if (node instanceof BABYLON.Mesh && node.getTotalVertices() > 0) {
+            const vertices = ModelProperties._vertices(node, context);
+            content.table = { ...vertices.table, title: 'Vertices', notice: vertices.notice };
+        }
+        return content;
+    }
+
+    /**
+     * The nodes below a node (the tree shows root nodes only): transform nodes and meshes (parts)
+     * of the whole hierarchy, each as an accordion entry with its main properties and the commands
+     * of the tree context menu.
+     * @param {BABYLON.TransformNode} node
+     * @param {PropertiesContext} context
+     * @returns {import('./PropertyPanel').PanelList[]}
+     */
+    static _nodeLists(node, context) {
+        const { container } = context;
+        const own = new Set([...container.meshes, ...container.transformNodes]);
+        const descendants = node.getDescendants(false, child => own.has(child));
+        const entry = (child, description) => ({
+            label: () => child.name || '(unnamed)',
+            description,
+            icon: child instanceof BABYLON.AbstractMesh ? 'symbol-structure' : 'symbol-namespace',
+            properties: () => ModelProperties._nodeProperties(child, context),
+            actions: ModelProperties._listedObjectActions({ kind: 'node', node: child }, context, true),
+            onOpen: () => ModelProperties.highlight({ kind: 'node', node: child }, context),
+            onClose: () => ModelProperties.highlight({ kind: 'node', node }, context),
+        });
+        return [
+            {
+                title: 'Nodes',
+                items: descendants
+                    .filter(child => !(child instanceof BABYLON.AbstractMesh))
+                    .map(child => entry(child, () => (child.parent && child.parent !== node ? `in ${child.parent.name}` : ''))),
+            },
+            {
+                title: 'Parts',
+                items: descendants
+                    .filter(child => child instanceof BABYLON.AbstractMesh)
+                    .map(child => ({
+                        ...entry(child, () => `${child.getTotalVertices()} v`),
+                        toggle: {
+                            label: 'Hide',
+                            title: () => (context.isHiddenInView(child) ? 'Show the part in the 3D view' : 'Hide the part in the 3D view (the file is not changed)'),
+                            icon: () => (context.isHiddenInView(child) ? 'eye-closed' : 'eye'),
+                            isActive: () => context.isHiddenInView(child),
+                            transient: true,
+                            run: () => context.setHiddenInView(child, !context.isHiddenInView(child)),
+                        },
+                    })),
+            },
+        ];
+    }
+
+    /**
+     * Commands of an object listed in the inspector: the item commands of the tree it is not in.
+     * @param {ModelItemData} data
+     * @param {PropertiesContext} context
+     * @param {boolean} canRename
+     * @returns {import('./PropertyPanel').PanelAction[]}
+     */
+    static _listedObjectActions(data, { openObject, objectCommand }, canRename) {
+        return [
+            { label: 'Open', title: 'Open in its own inspector', icon: 'go-to-file', transient: true, run: () => openObject(data) },
+            ...(canRename ? [{ label: 'Rename…', title: `Rename the ${data.kind}`, icon: 'edit', run: () => objectCommand('rename', data) }] : []),
+            { label: 'Delete', title: `Delete the ${data.kind}`, icon: 'trash', run: () => objectCommand('delete', data) },
+        ];
+    }
+
+    /**
+     * The texture slots of a material as selects of the model's textures (the textures themselves
+     * are the Textures section of the tree).
+     * @param {BABYLON.Material} material
+     * @param {PropertiesContext} context
+     * @returns {PropertyDescriptor[]}
+     */
+    static _textureSlotProperties(material, { container }) {
+        const slots = new Set(MATERIAL_TEXTURE_SLOTS[material.getClassName()] ?? []);
+        // Slots of other material classes that hold a texture are shown too
+        for (const key of Object.keys(material.serialize())) {
+            if (material[key] instanceof BABYLON.BaseTexture) slots.add(key);
+        }
+        if (!slots.size) return [];
+        const options = () => [
+            { value: '', label: '(none)' },
+            ...container.textures.map(texture => ({ value: String(texture.uniqueId), label: textureLabel(texture, container) })),
+        ];
+        return [
+            { label: 'Textures', type: 'section' },
+            ...[...slots].map(slot => ({
+                label: slot,
+                type: 'select',
+                options,
+                get: () => String(material[slot]?.uniqueId ?? ''),
+                set: (value) => { material[slot] = container.textures.find(texture => String(texture.uniqueId) === value) ?? null; },
+            })),
+        ];
+    }
+
+    /**
+     * Main properties of a node (its inspector and its entry in the lists of the parent).
+     * @param {BABYLON.TransformNode} node
+     * @param {PropertiesContext} context
+     * @returns {PropertyDescriptor[]}
+     */
+    static _nodeProperties(node, { container }) {
+        const isMesh = node instanceof BABYLON.AbstractMesh;
+        /** @type {PropertyDescriptor[]} */
+        const properties = [
+            textProperty(node, 'name'),
+            readonlyProperty('Type', () => node.getClassName()),
+            readonlyProperty('Parent', () => node.parent?.name ?? '—'),
+            { label: 'Enabled', type: 'boolean', get: () => node.isEnabled(false), set: (value) => node.setEnabled(value) },
+        ];
+        if (isMesh) {
+            properties.push(booleanProperty(node, 'isVisible', 'Visible'));
+        }
+        properties.push(
+            vectorProperty('Position', () => node.position),
+            nodeRotationProperty(node),
+            vectorProperty('Scaling', () => node.scaling),
+        );
+        if (isMesh) {
+            properties.push(
+                {
+                    label: 'Material',
+                    type: 'select',
+                    options: () => [
+                        { value: '', label: '(none)' },
+                        ...container.materials.map(material => ({ value: String(material.uniqueId), label: material.name || '(unnamed)' })),
+                    ],
+                    get: () => String(node.material?.uniqueId ?? ''),
+                    set: (value) => { node.material = container.materials.find(material => String(material.uniqueId) === value) ?? null; },
+                },
+                readonlyProperty('Vertices', () => node.getTotalVertices()),
+                readonlyProperty('Triangles', () => triangleCount(node)),
+                readonlyProperty('Indices', () => node.getTotalIndices()),
+                readonlyProperty('Skeleton', () => node.skeleton?.name ?? '—'),
+            );
+        }
+        return properties;
+    }
+
+    /**
+     * Explains how the file format limits what is saved for a node.
+     * @param {BABYLON.TransformNode} node
+     * @param {string} fileType
+     * @returns {string | undefined}
+     */
+    static _formatNotice(node, fileType) {
+        if (fileType === 'obj' || fileType === 'stl') {
+            const names = fileType === 'stl' ? ' STL does not store mesh names.' : '';
+            return `${fileType.toUpperCase()} has no node transforms: position, rotation and scaling are baked into the vertices on save.${names}`;
+        }
+        if (fileType === 'glb' && node instanceof BABYLON.AbstractMesh && node.skeleton) {
+            return 'glTF ignores the transform of skinned meshes: position, rotation and scaling of this mesh are not saved.';
+        }
+        return undefined;
+    }
+
+    /**
+     * Vertex table: position, normal and UV per vertex. Edits replace the vertex buffer of the
+     * mesh geometry (shared by all meshes using that geometry).
+     * @param {BABYLON.Mesh} mesh
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _vertices(mesh, { highlighter }) {
+        const K = BABYLON.VertexBuffer;
+        /** @type {import('./DataTable').TableColumn[]} */
+        const columns = [{ label: '#', leading: true, width: 56, get: row => row }];
+        /** @type {{ key: string, label: string }[]} */
+        const groups = [];
+        const addColumns = (kind, groupLabel, labels) => {
+            if (!mesh.isVerticesDataPresent(kind)) return;
+            groups.push({ key: kind, label: groupLabel });
+            const stride = labels.length;
+            labels.forEach((label, component) => columns.push({
+                label,
+                group: kind,
+                get: row => mesh.getVerticesData(kind)?.[row * stride + component] ?? '',
+                set: (row, value) => {
+                    const data = Float32Array.from(mesh.getVerticesData(kind));
+                    data[row * stride + component] = value;
+                    mesh.setVerticesData(kind, data, true, stride);
+                    if (kind === K.PositionKind) {
+                        mesh.refreshBoundingInfo();
+                        highlighter.showVertex(mesh, row);
+                    }
+                },
+            }));
+        };
+        addColumns(K.PositionKind, 'Position', ['X', 'Y', 'Z']);
+        addColumns(K.NormalKind, 'Normal', ['NX', 'NY', 'NZ']);
+        addColumns(K.UVKind, 'UV', ['U', 'V']);
+
+        const sharedWith = (mesh.geometry?.meshes.length ?? 1) - 1;
+        return {
+            title: 'Vertices',
+            subtitle: () => mesh.name,
+            notice: `Double-click a cell to edit.${sharedWith > 0 ? ` The geometry is shared with ${sharedWith} other mesh(es).` : ''}`,
+            table: {
+                columns,
+                groups,
+                rowCount: () => mesh.getTotalVertices(),
+                onSelectRow: row => highlighter.showVertex(mesh, row),
+            },
+        };
+    }
+
+    /**
+     * @param {BABYLON.Material} material
+     * @returns {PanelContent}
+     */
+    static _material(material, context) {
+        /** @type {PropertyDescriptor[]} */
+        const properties = [
+            textProperty(material, 'name'),
+            readonlyProperty('Type', () => material.getClassName()),
+            numberProperty(material, 'alpha', 'Alpha'),
+            booleanProperty(material, 'backFaceCulling', 'Back-face culling'),
+            booleanProperty(material, 'wireframe', 'Wireframe'),
+        ];
+        if (material instanceof BABYLON.StandardMaterial) {
+            properties.push(
+                ...colorProperty(material, 'diffuseColor', 'Diffuse'),
+                ...colorProperty(material, 'specularColor', 'Specular'),
+                ...colorProperty(material, 'emissiveColor', 'Emissive'),
+                ...colorProperty(material, 'ambientColor', 'Ambient'),
+                numberProperty(material, 'specularPower', 'Specular power'),
+            );
+        } else if (material instanceof BABYLON.PBRMaterial) {
+            properties.push(
+                ...colorProperty(material, 'albedoColor', 'Albedo'),
+                ...colorProperty(material, 'emissiveColor', 'Emissive'),
+                ...colorProperty(material, 'reflectivityColor', 'Reflectivity'),
+                numberProperty(material, 'metallic', 'Metallic', true),
+                numberProperty(material, 'roughness', 'Roughness', true),
+            );
+        }
+        properties.push(...ModelProperties._textureSlotProperties(material, context));
+        return { title: 'Material', subtitle: () => material.name, properties };
+    }
+
+    /**
+     * Properties of a texture (its inspector and its entry in the list of a material). A click on
+     * the preview opens the commands of the image (save, replace, copy, paste).
+     * @param {BABYLON.BaseTexture} texture
+     * @param {PropertiesContext} context
+     * @returns {PropertyDescriptor[]}
+     */
+    static _textureProperties(texture, { textureImage, container }) {
+        /** @type {PropertyDescriptor[]} */
+        const properties = [
+            textProperty(texture, 'name'),
+            readonlyProperty('Type', () => texture.getClassName()),
+            readonlyProperty('Size', () => { const size = texture.getSize(); return `${size.width} × ${size.height}`; }),
+            numberProperty(texture, 'level', 'Level'),
+            booleanProperty(texture, 'hasAlpha', 'Has alpha'),
+        ];
+        if (texture instanceof BABYLON.Texture) {
+            properties.splice(2, 0, readonlyProperty('URL', () => texture.url ?? '—'), {
+                label: 'Preview',
+                type: 'image',
+                get: () => texturePreview(texture),
+                overlay: () => textureImage.uvOverlay(texture),
+                menu: textureImage.actions(texture, () => textureLabel(texture, container)),
+            });
+            properties.push(
+                numberProperty(texture, 'uScale', 'U scale'),
+                numberProperty(texture, 'vScale', 'V scale'),
+                numberProperty(texture, 'uOffset', 'U offset'),
+                numberProperty(texture, 'vOffset', 'V offset'),
+            );
+        }
+        return properties;
+    }
+
+    /**
+     * A camera of the model (the editor views the model with its own camera).
+     * @param {BABYLON.Camera} camera
+     * @returns {PanelContent}
+     */
+    static _camera(camera) {
+        const properties = [
+            textProperty(camera, 'name'),
+            readonlyProperty('Type', () => camera.getClassName()),
+            vectorProperty('Position', () => camera.position),
+        ];
+        if (camera instanceof BABYLON.TargetCamera) {
+            properties.push({
+                label: 'Target',
+                type: 'vector',
+                get: () => camera.getTarget().asArray(),
+                set: value => camera.setTarget(BABYLON.Vector3.FromArray(value)),
+            });
+        }
+        if (camera instanceof BABYLON.ArcRotateCamera) {
+            properties.push(numberProperty(camera, 'alpha', 'Alpha'), numberProperty(camera, 'beta', 'Beta'), numberProperty(camera, 'radius', 'Radius'));
+        }
+        if (camera.mode === BABYLON.Camera.PERSPECTIVE_CAMERA) properties.push(numberProperty(camera, 'fov', 'Field of view (rad)'));
+        properties.push(numberProperty(camera, 'minZ', 'Near plane'), numberProperty(camera, 'maxZ', 'Far plane'));
+        return {
+            title: 'Camera',
+            subtitle: () => camera.name,
+            notice: 'A camera stored in the model; the editor shows the model with its own camera.',
+            twoColumns: true,
+            properties,
+        };
+    }
+
+    /**
+     * @param {BABYLON.Light} light
+     * @returns {PanelContent}
+     */
+    static _light(light) {
+        const properties = [
+            textProperty(light, 'name'),
+            readonlyProperty('Type', () => light.getClassName()),
+            { label: 'Enabled', type: 'boolean', get: () => light.isEnabled(false), set: value => light.setEnabled(value) },
+            numberProperty(light, 'intensity', 'Intensity'),
+            ...colorProperty(light, 'diffuse', 'Diffuse'),
+            ...colorProperty(light, 'specular', 'Specular'),
+        ];
+        if (light instanceof BABYLON.HemisphericLight) properties.push(...colorProperty(light, 'groundColor', 'Ground color'));
+        if (light.position instanceof BABYLON.Vector3) properties.push(vectorProperty('Position', () => light.position));
+        if (light.direction instanceof BABYLON.Vector3) properties.push(vectorProperty('Direction', () => light.direction));
+        if (light instanceof BABYLON.PointLight || light instanceof BABYLON.SpotLight) properties.push(numberProperty(light, 'range', 'Range'));
+        if (light instanceof BABYLON.SpotLight) properties.push(numberProperty(light, 'angle', 'Angle (rad)'), numberProperty(light, 'exponent', 'Exponent'));
+        return { title: 'Light', subtitle: () => light.name, twoColumns: true, properties };
+    }
+
+    /**
+     * @param {BABYLON.ShadowGenerator} generator
+     * @returns {PanelContent}
+     */
+    static _shadowGenerator(generator) {
+        const filters = {
+            [BABYLON.ShadowGenerator.FILTER_NONE]: 'None',
+            [BABYLON.ShadowGenerator.FILTER_EXPONENTIALSHADOWMAP]: 'Exponential',
+            [BABYLON.ShadowGenerator.FILTER_POISSONSAMPLING]: 'Poisson sampling',
+            [BABYLON.ShadowGenerator.FILTER_BLUREXPONENTIALSHADOWMAP]: 'Blurred exponential',
+            [BABYLON.ShadowGenerator.FILTER_CLOSEEXPONENTIALSHADOWMAP]: 'Close exponential',
+            [BABYLON.ShadowGenerator.FILTER_BLURCLOSEEXPONENTIALSHADOWMAP]: 'Blurred close exponential',
+            [BABYLON.ShadowGenerator.FILTER_PCF]: 'PCF',
+            [BABYLON.ShadowGenerator.FILTER_PCSS]: 'PCSS',
+        };
+        return {
+            title: 'Shadow generator',
+            subtitle: () => generator.getLight().name,
+            twoColumns: true,
+            properties: [
+                readonlyProperty('Light', () => generator.getLight().name),
+                readonlyProperty('Map size', () => generator.getShadowMap()?.getSize().width ?? '—'),
+                readonlyProperty('Filter', () => filters[generator.filter] ?? generator.filter),
+                readonlyProperty('Shadow casters', () => generator.getShadowMap()?.renderList?.length ?? 0),
+                numberProperty(generator, 'bias', 'Bias'),
+                numberProperty(generator, 'normalBias', 'Normal bias'),
+                { label: 'Darkness', type: 'number', get: () => generator.getDarkness(), set: value => generator.setDarkness(value) },
+            ],
+        };
+    }
+
+    /**
+     * The file itself, shown before an item of the tree is selected: the top-level values of a
+     * `.babylon` document (editable) or the header / asset info of other formats.
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _file({ fileName, fileFields, documentFields, convertedFrom }) {
+        const converted = convertedFrom
+            ? `${convertedFrom} is edited as a .babylon document: saving converts it back (Save Model As… writes other formats). `
+            : '';
+        return {
+            title: 'File',
+            subtitle: () => fileName,
+            notice: converted + (documentFields
+                ? 'Values of the file that are not in the model tree. Select an item in the Babylon Model tree to edit the model.'
+                : 'Select an item in the Babylon Model tree to inspect or edit the model.'),
+            properties: documentFields
+                ? ModelProperties._documentGroups(documentFields)
+                : (fileFields ?? []).map(field => readonlyProperty(field.label, () => field.value)),
+        };
+    }
+
+    /**
+     * Top-level values first (the Properties group), then one group per object value (e.g.
+     * producer: name, version, …) labeled without the group name.
+     * @param {import('./BabylonJsonBinding').DocumentField[]} fields
+     * @returns {PropertyDescriptor[]}
+     */
+    static _documentGroups(fields) {
+        /** @type {PropertyDescriptor[]} */
+        const properties = fields.filter(field => field.path.length === 1).map(field => documentProperty(field));
+        /** @type {Map<string | number, import('./BabylonJsonBinding').DocumentField[]>} */
+        const groups = new Map();
+        for (const field of fields.filter(candidate => candidate.path.length > 1)) {
+            const [group] = field.path;
+            if (!groups.has(group)) groups.set(group, []);
+            groups.get(group).push(field);
+        }
+        for (const [group, members] of groups) {
+            const title = String(group);
+            properties.push({ label: title[0].toUpperCase() + title.slice(1), type: 'section' });
+            properties.push(...members.map(field => documentProperty(field, field.path.slice(1).join('.'))));
+        }
+        return properties;
+    }
+
+    /**
+     * Skeleton properties and a table of the bones in the rest pose (editable) or in the bind
+     * pose (read-only: changing it would change how the mesh is skinned), with a button that
+     * shows the chosen pose.
+     * @param {BABYLON.Skeleton} skeleton
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _skeleton(skeleton, { animations, highlighter, showPose, isPose }) {
+        const bones = skeleton.bones;
+        const groups = ['position', 'rotation', 'scaling'];
+        /** @type {'rest' | 'bind'} set by the Rest | Bind switch of the panel */
+        let pose = 'rest';
+        // Editing a bind matrix: whether the child joints move with the edited bone
+        let moveChildren = true;
+        const bindValues = bone => matrixValues(animations.poseMatrix(bone, 'bind'));
+        const writeBind = (bone, component, value) => {
+            const values = bindValues(bone);
+            values[component] = value;
+            animations.setBindMatrix(bone, composeValues(values), moveChildren);
+            showPose(skeleton, 'bind');
+        };
+        const poseName = () => pose === 'rest' ? 'Rest pose' : 'Bind pose';
+        /** @type {import('./DataTable').TableColumn[]} */
+        const columns = [
+            {
+                label: 'Name',
+                title: true,
+                text: true,
+                get: row => bones[row].name,
+                // glTF saves the name of the transform node linked to the bone
+                set: (row, name) => {
+                    bones[row].name = String(name);
+                    const node = bones[row].getTransformNode();
+                    if (node) node.name = String(name);
+                },
+            },
+            ...['PX', 'PY', 'PZ', 'RX°', 'RY°', 'RZ°', 'SX', 'SY', 'SZ'].map((label, component) => ({
+                label,
+                group: groups[Math.floor(component / 3)],
+                get: row => (pose === 'rest' ? readRest(bones[row]) : bindValues(bones[row]))[component],
+                set: (row, value) => pose === 'rest'
+                    ? writeRest(bones[row], component, value, animations)
+                    : writeBind(bones[row], component, value),
+                // A bind edit may change the children too, so the whole skeleton is captured
+                capture: row => pose === 'rest'
+                    ? { pose: 'rest', matrix: bones[row].getRestMatrix().clone() }
+                    : { pose: 'bind', matrices: animations.captureBind(skeleton) },
+                restore: (row, state) => {
+                    if (state.pose === 'rest') {
+                        restoreRest(bones[row], state.matrix, animations);
+                    } else {
+                        animations.restoreBind(skeleton, state.matrices);
+                        showPose(skeleton, 'bind');
+                    }
+                },
+            })),
+        ];
+        return {
+            title: 'Skeleton',
+            subtitle: () => skeleton.name,
+            twoColumns: true,
+            properties: [
+                textProperty(skeleton, 'name'),
+                readonlyProperty('Bones', () => bones.length),
+                readonlyProperty('Animation ranges', () => skeleton.getAnimationRanges().filter(Boolean).length),
+            ],
+            table: {
+                title: 'Bones',
+                columns,
+                groups: groups.map(key => ({ key, label: key[0].toUpperCase() + key.slice(1) })),
+                modes: [{ key: 'rest', label: 'Rest' }, { key: 'bind', label: 'Bind' }],
+                setMode: (key) => { pose = key === 'bind' ? 'bind' : 'rest'; },
+                actions: [{
+                    label: poseName,
+                    title: () => pose === 'rest'
+                        ? 'Show the rest pose of the skeleton; stops the animation and the auto-orbit'
+                        : 'Show the bind pose (the pose the mesh is skinned in); stops the animation and the auto-orbit',
+                    icon: 'person',
+                    transient: true,
+                    run: () => showPose(skeleton, pose),
+                    isDisabled: () => isPose(skeleton, pose),
+                }, {
+                    label: 'Move children',
+                    title: () => moveChildren
+                        ? 'Editing a bind value moves the child joints with the bone (click to keep them in place)'
+                        : 'Editing a bind value keeps the child joints in place (click to move them with the bone)',
+                    icon: 'type-hierarchy-sub',
+                    transient: true,
+                    isActive: () => moveChildren,
+                    isHidden: () => pose !== 'bind',
+                    run: () => { moveChildren = !moveChildren; },
+                }],
+                noticeWarning: () => pose === 'bind',
+                notice: () => pose === 'rest'
+                    ? 'Rest pose of the bones relative to the parent bone; an edited bone shows it while no animation is playing. Double-click a bone name to rename it.'
+                    : 'Bind pose: where the joints sit relative to the mesh. Editing it changes how the mesh is skinned, so every animation will deform the mesh differently. Double-click a value to edit it, a bone name to rename it.',
+                rowCount: () => bones.length,
+                onSelectRow: row => highlighter.selectBone(bones[row] ?? null),
+                rowOf: object => bones.indexOf(object),
+            },
+        };
+    }
+
+    /**
+     * @param {BABYLON.Bone} bone
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _bone(bone, { animations }) {
+        return {
+            title: 'Bone',
+            subtitle: () => bone.name,
+            notice: 'The rest pose is visible while no animation is playing.',
+            properties: [
+                textProperty(bone, 'name'),
+                readonlyProperty('Parent', () => bone.getParent()?.name ?? '—'),
+                readonlyProperty('Children', () => bone.getChildren().length),
+                ...boneRestProperties(bone, animations),
+            ],
+        };
+    }
+
+    /**
+     * @param {import('./AnimationController').AnimationClip} clip
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _clip(clip, context) {
+        const { animations } = context;
+        const isRange = clip.ranges.length > 0;
+        const frameProperty = (label, key) => isRange
+            ? {
+                label, type: 'number',
+                get: () => clip[key],
+                set: (value) => key === 'from' ? animations.setClipRange(clip, value, clip.to) : animations.setClipRange(clip, clip.from, value),
+            }
+            : readonlyProperty(label, () => clip[key]);
+        const range = [frameProperty('From frame', 'from'), frameProperty('To frame', 'to')];
+        // The whole timeline has no name (its header names the clip at the shown frame)
+        return ClipFrameEditor.describe(clip, context, clip.isTimeline ? range : [
+            { label: 'Name', type: 'text', get: () => clip.name, set: (value) => animations.renameClip(clip, value) },
+            ...range,
+        ]);
+    }
+}

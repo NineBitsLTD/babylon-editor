@@ -1,0 +1,189 @@
+# AGENTS.md
+
+Guidelines for AI agents (Claude, Gemini, GPT, Codex, etc.)
+
+## Overview
+
+VS Code extension that renders 3D model files (`.babylon`, `.glb`, `.gltf`, `.gltf2`, `.obj`, `.stl`, `.ply`, `.splat`, `.spz`) using Babylon.js. It contributes (besides adding `.babylon` / `.gltf` / `.gltf2` to the built-in `json` language, so the text editor treats them as JSON):
+- A **3D editor** in a webview: a 3D view (camera framed on the model — skinned meshes by their posed bounds, glTF models from the front since they face +Z; the player at the top of the view has render mode buttons on the left — textured / solid (Babylon's global `MaterialFlags.*TextureEnabled` off) / wireframe (`scene.forceWireframe`), view only and kept in the webview state, `Editor._setRenderMode` — then, in skeleton mode, the mesh / bones toggles, Reset view (`CameraController.resetView`: back to the framed position), auto-orbit (off on open), play/pause, a seek slider and the current clip as a tag below it on the right; the toolbar above switches the view with icon buttons — Desktop (both), Model, Inspector, kept for the next opened files) next to a resizable inspector on the right (its header — kind, name, back button — stays, the rest scrolls, in collapsible groups: Properties, Other file fields (collapsed by default), the table; object values of the file such as `producer` are their own group). Below 500 px Desktop is hidden and the last single view is shown; when the model view next to the inspector is narrower than its player in one line (`Editor._playerWidth`: the controls at min-content, measured while shown, re-checked after a model load, a selection and a splitter drag), Desktop is hidden and the model is shown alone until it fits again. The view, the render mode and the UV layout (shown, color) are kept in the panel state and, through `{ type: 'viewSettings', settings }`, in the host's `globalState` (`babylonEditor.viewSettings`), passed to new webviews as `payload.viewSettings`: a newly opened file starts with the last chosen view. There are no separate view/edit modes. `.babylon` files use `babylon-editor.textEditor` (`src/components/BabylonTextEditor.js`, a **custom text editor**: the text document is the single source of truth, see *Document sync*). `.glb`, `.gltf`, `.gltf2`, `.obj` and `.stl` open in `babylon-editor.editor` (`src/components/BabylonEditor.jsx`), which converts them to a `.babylon` document and hands over to the text editor (see *Converted models*); `.ply`, `.splat`, `.spz` (and models whose text would exceed ~48 MB) stay in this binary custom editor, which regenerates the file on save.
+- A **compact text view** of `.babylon` files (`babylon-editor.openCollapsedText`, "Open as Compact Text"): `src/components/BabylonTextProvider.js` is a `FileSystemProvider` for the `babylon-text` scheme (`babylon-text:<path>?<real file uri>`) that serves a live projection of the raw text document: vertex buffers, animation `keys` and long strings are replaced by `"…#12"` placeholders (`src/utils/collapseBabylon.js`; a placeholder refers to the value by its JSON path, its text is read from the raw document), the rest is formatted JSON. A CodeLens / hover link expands a placeholder in place. A `.babylon` file opened in a plain text editor is replaced by this view (setting `babylonEditor.collapseTextEditor`, on by default; the extension activates `onLanguage:json` for that) unless it was opened with `babylon-editor.openRawText`; the editor titles of the three views (raw text, compact text, 3D editor) have buttons to open the other two (`openRawText`, `openCollapsedText`, `openInModelEditor`), replacing the active tab (`BabylonTextProvider._switchView`).
+- A **Babylon Model** view in the Explorer sidebar (`babylon-editor.modelTree`, shown while a Babylon editor is active via the `babylonEditor.active` context key) with the model tree of the active editor; selecting an item opens it in the inspector. Clips are picked there too: the clip inspector has a **Play** action (always enabled; it makes the clip current and plays it from the start, and turns into **Pause** while this clip plays). In the 3D editor editing happens through UI controls, never through text edits; saving regenerates the file in its original format.
+
+## Commands
+
+```bash
+npm run build      # full production build into dist/ (runs clean → js → editor → css → copy:codicons → copy:assets)
+npm run watch      # build once, then run all watchers concurrently (esbuild --watch + sass)
+npx eslint src     # lint (no "lint" npm script; config matches **/*.js only, so .jsx files are skipped)
+```
+
+There are no tests yet: `.vscode-test.mjs` targets `test/**/*.test.js`, but neither the `test/` directory nor `@vscode/test-cli` (and therefore `npm test`) is set up.
+
+Individual build steps live as separate npm scripts (`build:js`, `build:js-editor`, `build:css`) — use them to rebuild a single target instead of the whole pipeline.
+
+To run/debug the extension: press F5 in VS Code (uses the "Run Extension" launch config in `.vscode/launch.json`, which loads the extension from the workspace folder). The extension entry point is `dist/extension.cjs`, so **you must build (or watch) before launching** — VS Code loads bundled output, not `src/`.
+
+## Build architecture
+
+Source is authored as **ESM** (`"type": "module"` in package.json) and bundled with **esbuild** into two targets, each with a different runtime environment:
+
+1. **Extension host** — `src/extension.js` → `dist/extension.cjs`. Bundled as CJS for Node, with `vscode` marked external. This is the code that runs inside VS Code's extension host process.
+2. **Editor webview** — `src/editor.js` → `dist/js/editor.js`. Runs in the browser sandbox of the custom editor. Uses `@babylonjs/core` directly (raw `Engine` + `Scene`).
+
+`src/editor.js` is the webview entry point (`Editor` wires everything together); its modules live in `src/editor/`:
+- Babylon-agnostic UI widgets: `Toolbar`, `PropertyPanel` (typed property editors + actions + table; content with `curves` gets a Table / Graph view switch; `lists` are accordion groups after the main properties — an entry's properties and actions are rendered when it is opened, and opening one closes the open entry of any list; an entry `toggle` is a small button at the end of its header line, e.g. the eye that hides a part in the 3D view through its layer mask without changing the model — `Editor._setHiddenInView`; hidden parts and the open entry (by list and label, `_openKey`) survive a reload of the model; the `image` property type shows a preview, its `get` may return a promise; its `menu` actions open in a `PopupMenu` by a click, right click or Enter on the image, its `overlay` is an image laid over it), `DataTable` (virtualized table with cell editing), `CurveTable` (virtualized graph view: a frame ruler, per record a name line and three lanes (channel label on top) with the interpolated curve scaled to its own min/max, the zero axis when 0 is in that range and draggable keys; one pair of zoom sliders — time axis and lane height — shared by all graphs; a key drag is one undo command, Escape cancels it; the hovered or dragged key shows its value in a label; a click on a key without moving opens an input to type the value; the graph is focusable: while paused, Left / Right step to the previous / next frame (`isPlaying`); `updateCurrentFrame()` moves the current frame marker without re-rendering and scrolls the time axis to keep it visible; `bands` mark frame ranges in a strip above the ruler and behind the curves — the clips on the Frames graph, and the empty ranges picked (red) or kept (dark) by **Remove empty ranges**, toggled by a click; `actions` are buttons in the bar above the graph), `PanelResizer` (splitter; the inspector width is kept in the webview state), `PopupMenu` (a menu of `PanelAction`s at a point; an action with `colors` / `color` / `setColor` gets swatches and a color picker in its line), `HostRequests` (webview → host requests answered by `hostReply`), `EditHistory` (undo/redo commands), `ModelTreeBridge` (serves tree items to the Explorer view by id, caching them so ids stay stable).
+- Babylon-specific: `AnimationController` (clip list, playback, clip rename/range edit, poses: `showPose(skeleton, 'rest' | 'bind')` pauses playback and puts the bones into the rest pose or the bind pose — for glTF the root bone's bind matrix is converted from the glTF scene space to its parent node; `isPose` is used to disable the pose button; `renumberFrames(clip)` — the **Renumber** action of the clip inspector — removes the frames without a key in any track and makes the others `from`, `from + 1`, … (the frame rate stays), moving the keys and clips after it on a shared timeline by the same amount; `captureFrames` / `restoreFrames` snapshot keys and windows for undo; `frames` is the whole shared timeline as a clip (`isTimeline`, only when the clips are ranges of one timeline — not for glTF groups), shown as **Frames** first in the Animations section (`item:timeline`: no rename / delete; its inspector has no Name, the Frame comes first and the header names the first clip containing the shown frame) and played like a clip; `emptyRanges` / `removeFrameRanges` find and remove runs of frames without keys, moving later keys and clip windows back; Babylon's `RuntimeAnimation` inserts a key at frame 0 into animations that start later — `hasRuntimeStartKey` / `modelKeys` leave it out of the model (frames, graph keys, `serializeKeys`)), `CameraController` (framing with its own camera, auto-orbit; the right button pans — the panning sensibility is updated every frame so the model follows the cursor at the current distance; a default light only when the model has none — the model's lights are kept), `SelectionHighlighter` (outline / vertex marker / skeleton mode: selecting a skeleton, bone or clip shows the bones; the player can hide the model meshes (shown by default) via `layerMask`, restored by `clear()` before serializing; the choice is kept in the webview state), `SkeletonView` (bones drawn as pyramids from each joint to its child joints, following the animation; the selected bone is highlighted; a click on a pyramid picks the bone — `Editor` selects its record in the clip table / graph via `table.rowOf` and scrolls to it, otherwise opens the bone inspector), `ModelOutline` (lazy tree items from an `AssetContainer`; the sections depend on the format — OBJ: nodes, materials, textures; STL/PLY/splats: nodes; only root nodes are listed — the transform nodes and meshes below a node are its inspector's Nodes / Parts lists; materials have no children — their textures are the Textures list of the material inspector; skeletons are leaves, their bones are a table in the skeleton inspector), `BabylonFileSchema` (the fields of the `.babylon` format per object kind, from https://doc.babylonjs.com/setup/support/.babylonFileFormat plus fog and PBR fields Babylon reads; `ModelProperties.describe` appends them to every inspector as "Other file fields" — for `.babylon` a field the file does not have is shown dimmed (`isUnset`, via `BabylonJsonBinding.isInDocument` / `pathOf`) and is added to the text when set), `ModelProperties` (inspector content per object kind: file (shown before an item is selected: the top-level values of a `.babylon` document outside the tree — `BabylonJsonBinding.documentFields`, editable — or, for other formats, read-only header / asset info from `FileInfo`), node (a mesh includes its vertex table; the Nodes / Parts lists hold the whole hierarchy below it, flat, each entry with the main node properties and Open / Rename… / Delete — `Editor._openObject` shows it in its own inspector whose back button returns, `Editor._objectCommand` posts `{ type: 'objectCommand', op, id }` and the host asks and sends the usual `treeCommand`, the id resolving through `Editor._inspectorObjects`), material (a Textures group with one select per texture slot of its class — `MATERIAL_TEXTURE_SLOTS` — listing the model's textures by `textureLabel`: a texture named by its location is shown as `<material> <slot> [N]`; for `.babylon` the binding writes a picked texture as a copy of its document object, compared by a cheap `signature`), texture (a preview: the image url, an embedded data url, or the pixels read from the GPU — `TextureImage.texturePreview`; a click on it opens the image menu of `TextureImage`: Save to disk…, Replace from disk…, Copy image (PNG), Copy base64 (data url), Paste from clipboard (an image, or a data url / bare base64 in the text), Show / Hide UV layout (`UvLayout`: the triangles of the meshes drawn with the texture at the coordinates it reads (`coordinatesIndex`, the texture transform is not applied, repeated triangles moved into the first tile), unmapped areas shaded; laid over the preview as the image `overlay`, for every texture; the line color is chosen in the menu line — presets cyan `#00e5ff` and its inverse `#ff1a00`, or a picker — used by the copy too; the color and whether the layout is shown are kept like the view settings, `uvColor` / `showUv`), Copy UV layout (that image as a PNG of the texture size with a transparent background, to lay over the texture in an image editor); all but Copy base64 work with the decoded bytes; a replacement is stretched to the texture size and written in its type (PNG when the canvas cannot write it); `ModelEdits.replaceTextureImage` embeds it as `base64String` into every texture object of the document the texture was loaded from — an external image file is not changed — or, for other formats, runs `texture.updateURL` as an undoable command), texture, camera, light, shadow generator (a child item of its light), skeleton (bone table with a Rest | Bind switch — `table.modes` — and a Rest pose / Bind pose button next to it — `table.actions`; rest values are editable; bind values are editable too, with a warning notice (`table.noticeWarning`) and a **Move children** toggle — `AnimationController.setBindMatrix` either moves the child joints with the bone or recomputes their local bind matrices so they keep their place; bind undo snapshots the whole skeleton (`captureBind` / `restoreBind`); a bone is renamed by editing its name tag — a `text` column — which also renames the linked glTF node), bone (opened by picking a bone when the inspector has no bone table), clip), `ClipFrameEditor` (clip inspector: transforms of all animated bones/nodes at a selected frame — `.babylon` bone matrices and glTF position/rotation/scaling tracks are shown uniformly as position / rotation° / scaling; editing a frame without a key inserts one with the interpolated value; while the clip plays the graph marks the playing frame — `Editor` calls `PropertyPanel.updateCurrentFrame()` after each render — and picking a frame (a click on a graph lane or key, the Frame property) pauses playback; pausing or seeking while paused makes the stopped frame the inspector frame — `Editor._syncClipFrame`; the zoom sliders do not pause), `ModelSerializer` (writes the model back).
+
+Widgets never mutate the model: property descriptors and table columns carry `get`/`set` (and optional exact `capture`/`restore` snapshots), and `Editor` turns every commit into an `EditHistory` command. Descriptors/actions flagged `transient` (e.g. the clip frame, Play animation) are editor state: they bypass the history and stay enabled for view-only formats.
+
+`DataTable` shows each record as a block: `leading` columns (index) on the left, an optional `title` column as a tag line above the values (the bone name in the clip table), and value columns sharing the width in lines of at most three values; a new `group` (e.g. position / normal / uv) starts a new line. The header is a single line: each value slot lists the labels of its column in all lines, separated by `/` (e.g. `PX/RX°/SX`). A table with `groups` (clip: position / rotation / scaling; vertices: position / normal / uv) gets a switch above it in `PropertyPanel` and shows only the chosen group (the first by default; the choice is kept while switching objects).
+
+`PanelAction` buttons show a short `label` (e.g. Play, Prev, Next) and the full description in `title` (the tooltip); `label`, `title` and `icon` may be functions re-read on refresh.
+
+SCSS in `src/scss/` is compiled by `sass` then bundled by esbuild into `dist/css/`. `copy:codicons` copies the `@vscode/codicons` font and CSS to `dist/codicons/` (the webview can only load files from `dist/`). `copy:assets` copies `public/*` to `dist/` (the `public/` dir may not exist — the script tolerates that).
+
+## Custom JSX runtime (important)
+
+This project does **not** use React. `src/utils/jsx-runtime.js` implements a minimal JSX runtime (`jsx`/`jsxs`/`Fragment`) that renders JSX **directly to HTML strings**. It is wired up via:
+- `package.json` build: `--jsx=automatic --jsx-import-source=./utils`
+- `jsconfig.json`: `"jsxImportSource": "../utils"`
+
+Consequences when editing `.jsx` files (`BabylonEditor.jsx`):
+- JSX expressions produce **strings**, not virtual DOM. `_getHtmlForWebview` returns the HTML for a webview by evaluating JSX.
+- `className` is mapped to `class`; all other prop names are lowercased. `on*` handlers and function-valued props are **stripped** (no event binding — this is server-side HTML generation only).
+- There is no reconciliation, state, or hooks. Do not import React or React patterns.
+
+## Runtime data flow
+
+- **Custom editor (extension host → webview)**: the HTML injects only metadata, `window.payload = { type, mimeType, fileName, rootUrl }`, where `rootUrl` is the webview URI of the model folder (relative textures/`.bin`/`.mtl` resolve against it; the workspace folder is in `localResourceRoots`). The model bytes are sent by `postMessage` as `{ type: 'loadModel', data: ArrayBuffer }` in reply to the webview's `{ type: 'ready' }`, and as `{ type: 'reloadModel', data }` on revert. `src/editor.js` wraps the bytes in a `File` named `fileName` (the `.babylon` loader cannot read an `ArrayBufferView`) and loads it with `LoadAssetContainerAsync`.
+- **Host services**: `WebviewFiles` (`src/components/WebviewFiles.js`, set up by `setupWebview` for every editor webview) answers `saveFile` / `openFile` (dialogs starting in the model folder), `readClipboard` / `writeClipboard` (text, `vscode.env.clipboard`) and `showMessage` with `{ type: 'hostReply', requestId, result | error }`; images are written to the clipboard by the webview (`navigator.clipboard`, PNG only), clipboard images are read there too, falling back to the text read by the host.
+- **Model tree (Explorer)**: `src/components/ModelTreeProvider.js` is a `TreeDataProvider` on the host; the data stays in the webview. Sections only expand; model objects run `babylon-editor.tree.click` (a click on the shown item goes back to the file view, `{ type: 'treeSelect', id: null }`; the inspector header has a back button; both clear the tree selection with `list.clear`, focusing the tree first for the back button — the API has no deselect; `getParent` supports `TreeView.reveal`). The context menu (`contextValue` `section:<name>` / `item:<kind>`) has Add… on sections and Rename… / Delete on objects: the host asks for the type, name, image or confirmation and sends `{ type: 'treeCommand', op, … }`; `ModelEdits` (`src/editor/ModelEdits.js`) does the edit — `.babylon`: renames are patches, add / delete are `{ type: 'documentOps', ops }` (array items inserted / removed, references cleared) written by `BabylonTextEditor._writeOps` as one undo step, then the model reloads; other formats: undoable scene commands. Changed items are decorated like changed files (`resourceUri` with the `babylon-tree` scheme and a `FileDecorationProvider`: M / A): for `.babylon` the host compares the object with the saved file by id (`BabylonTextEditor._changeState`), other formats mark changed objects in the webview until saved (`documentSaved`). The host requests children with `{ type: 'treeRequest', requestId, parentId }` (null for roots) and the webview answers `{ type: 'treeItems', requestId, items }`; selection is sent as `{ type: 'treeSelect', id }`. The webview posts `treeReset` after loading a model and `treeChanged` after edits/undo/redo; the provider refreshes only for the active editor panel (the last active one while it stays visible).
+- **Edits and undo/redo (binary formats)**: the webview keeps the undo stack (`EditHistory`) and posts `{ type: 'edit', label }` per command; the host fires `onDidChangeCustomDocument` with `undo`/`redo` callbacks that post `{ type: 'undo' }` / `{ type: 'redo' }` back. The model bytes are **not** sent per edit.
+- **Save / Save As / backup (binary formats)**: the host posts `{ type: 'getFileData', requestId }`; the webview serializes the scene (`ModelSerializer`) and replies `{ type: 'fileData', requestId, data }` or `{ ..., error }`. The first save in a session asks for confirmation because the file is regenerated (exporter metadata, numeric precision and formatting change; a re-saved `person.babylon` grows from ~21 MB to ~46 MB). Backups are restored in `openCustomDocument` via `openContext.backupId`.
+- **Document sync (`.babylon`)**: the raw `TextDocument` is the only state; the 3D views (several per document: split works), the raw text and the compact view show it live, with one undo stack, one dirty state and one save (the text is saved as is, not regenerated).
+  - *3D → text*: the webview uses `DocumentEditHistory` instead of `EditHistory`: a command mutates the model, then `BabylonJsonBinding.collect()` (`src/editor/BabylonJsonBinding.js`) returns patches `{ path, value }` for the values that changed — nodes (name, transform, visibility, material), vertex buffers, materials (`material.serialize()` key by key; textures only by their edited fields, since their serialized form changes while they load), cameras and lights (`serialize()` key by key), shadow generators (bias, normalBias, darkness), top-level file values (producer, clearColor, …), skeletons (name, ranges, bone name / `matrix` (bind) / `rest` / animation `keys`), animation groups (keys of each targeted animation, matched by target id and animation name; `from` / `to`); node transform channels driven by an animation are not compared (they show the playing pose, not the file value); bulky values are marked changed by wrapping `setVerticesData` / `setKeys` of the bound objects. Float32 values are written as the shortest decimal. The webview posts `{ type: 'patch', label, patches }`; the host writes each value in place using the `JsonIndex` of the text (`src/utils/JsonIndex.js`: path → offsets, bulky arrays are leaves), inserting properties the file does not have yet, as one `WorkspaceEdit` (one undo step), and forwards the patches to the other 3D views.
+  - *text → 3D*: `JsonDocuments` (`src/components/JsonDocuments.js`) keeps the index of every open `.babylon` text up to date and reports the changed paths; the host sends `{ type: 'applyPatches', patches }` (after 150 ms) and the binding applies them to the model; a change it cannot apply in place (structure changed, clip ranges) or that cannot be located reloads the model (`reloadModel` with `keepView`: camera, clip, frame and selection stay). While the text is not valid JSON the views keep the last model and show `documentError` ("File format error: … Fix the file in the source text or undo the changes.").
+  - *compact ↔ raw*: compact edits are written into the raw text (the changed value is found by diffing against the last synced compact text, placeholders restored); raw changes are mirrored into the compact view by path (cut-out values stay placeholders; an unlocatable change re-collapses it). Saving the compact view saves the raw document; its `stat` mtime only changes when it is saved itself, so saves of the raw text are no conflict.
+  - *Save with a check*: Ctrl/Cmd+S in these editors runs `babylon-editor.save` (`BabylonTextEditor.saveWithCheck`): the text is loaded in a separate scene of an open 3D view (or a temporary helper panel, `validate` / `validated` messages); if it does not load, a modal asks "Save Anyway". The menu, auto save and Save All use the plain save (VS Code has no API to cancel a text save).
+  - `activate` returns `{ modelTree }` for integration tests (the tree items come from the webview, so they prove the model loaded).
+- **Converted models**: `ConvertedModels` (`src/components/ConvertedModels.js`) is a `FileSystemProvider` for the `babylon-model` scheme (`babylon-model:<path>.babylon?<model file uri>`): reading converts the model file, saving converts the document back and writes the model file (once per session and format a modal lists what the format drops; `.gltf` / `.gltf2` cannot be written: Save As), an external change of the model file converts it again (VS Code reloads the document). The binary editor converts on open in its own webview (after `resolveCustomEditor` returned — VS Code shows the webview only then), opens the document with the text editor and closes itself. Conversions run in a webview through `WebviewTasks` (`src/components/WebviewTasks.js`: `validate` / `convertModel` / `exportModel` requests answered by `validated` / `converted` / `exported`, in an open 3D view or a temporary helper panel; editor panels pass their messages to `handleMessage`). In the webview `ModelConverter` (`src/editor/ModelConverter.js`) loads the model in a separate scene and writes it clean: objects without a name get one (`mesh1`), ids are unique per namespace, external textures are named by their path relative to the model folder (the format reads `rootUrl + name`), embedded ones keep `base64String` and get `textureLabel` names, `url`s and default-material references are removed, glTF group animations are not repeated on their targets, numbers are shortest float32 decimals, the text is formatted with small objects (keys) on one line, `producer` names the model file. `setupWebview` resolves resources of a converted document against the model folder and passes `payload.convertedFrom` (shown in the File view). **Save Model As…** (`babylon-editor.saveAs`, Ctrl/Cmd+Shift+S in these editors) writes the model of the active document as `.babylon`, `.glb`, `.obj` or `.stl`. Node `Buffer`s from VS Code may be views of a pool: copy exact bytes (`toArrayBuffer`) before posting them.
+- **Savable formats**: `.babylon` (the text, see above; `ModelSerializer` still has the `SceneSerializer` path), `.glb` (`GLTF2Export.GLBAsync` with `exportUnusedUVs`, else UVs of meshes without textures are dropped), `.obj` (`OBJExport`, keeps the `mtllib` reference; the `.mtl` is not rewritten), `.stl` (`STLExport`, binary/ASCII as the source). `.gltf`/`.gltf2`/`.ply`/`.splat`/`.spz` are view-only (inspector disabled). Format limits: OBJ/STL bake node transforms into vertices, STL drops names, glTF ignores transforms of skinned meshes.
+- **Serialization scope**: `ModelSerializer.withModelOnly` (also used by the conversion) temporarily detaches from the scene everything not owned by the loaded `AssetContainer` (editor camera/light, the editor timeline group, Babylon's default material, highlight helpers) before running a whole-scene serializer.
+- **Loaders**: the `.babylon` loader lives in `@babylonjs/core` (registered by the full `@babylonjs/core` import), all other formats come from `@babylonjs/loaders`. When importing Babylon partially, register `@babylonjs/core/Loading/Plugins/babylonFileLoader` explicitly.
+- **Animations**: glTF provides `AnimationGroup`s. `.babylon` exports usually keep all clips on one timeline of bone animations plus named ranges (`skeleton.getAnimationRanges()`); `AnimationController` turns each range into a clip that plays a frame window of one shared `AnimationGroup` (no key copying), or the whole timeline as one clip when there are no ranges.
+- **`BabylonDocument`** (`src/components/BabylonDocument.js`) wraps the raw `Uint8Array` file content and derives `type` (extension), `mimeType` (magic-byte sniffing in `determineMimeType`), and an exact copy of the bytes for `postMessage` (`getArrayBuffer`).
+- **`VSCodeFSProvider`** (`src/components/VSCodeFSProvider.js`) implements Babylon's `IOfflineProvider` over `vscode.workspace.fs`, so Babylon can resolve external model resources (textures, `.bin`) through the VS Code filesystem instead of `fetch`. It is currently not wired in (it imports `vscode`, so it cannot run inside the webview).
+
+## Parsers & utils
+
+`src/utils/` (barrel-exported via `src/utils/index.js`): `collapseBabylon` (+ `restoreFragments`, `formatJson`), `parseGlb` (binary GLB → JSON + accessors), `parseBabylon`, `parseObj`, `getExtension`, `determineMimeType` (magic-byte MIME sniffing), `toBase64Url`.
+
+## Ignored files
+
+`dist/`, `node_modules/`, `.vscode/` and `*.vsix` are gitignored.
+
+## AI Coding Principles
+
+### 1. Study Existing Code and Reuse Analogues
+
+Before implementing a task, carefully study the surrounding environment and existing codebase.
+Find similar implementations, analyze them, and use these analogues as a basis for the current task.
+
+If an analogue contains logic errors, does not handle certain edge cases,
+or requires changes to be made universal enough to apply to the current task —
+always propose fixes to those existing modules as part of the work.
+
+### 2. Think Beyond the Current Task
+
+Do not strictly limit reasoning to the immediate task.
+Analyze adjacent modules and the overall project context to anticipate
+how the created modules and their functions may be used in similar cases elsewhere.
+
+### 3. Plan Before Complex Implementation
+
+Before implementing a complex task, always create a plan and analyze it thoroughly multiple times.
+Only begin implementation after the plan is approved — execute steps one by one,
+verifying each step's result and checking for errors and compliance with the plan.
+
+### 4. Prefer Universality Over Narrow Specificity
+
+Sometimes it is worth sacrificing strict specificity and minimalism in favor of universality.
+A more universal solution simplifies future use of the module,
+allows it to be applied in different situations,
+and eliminates code duplication.
+
+### 5. Modular Code Organization
+
+Write code in a modular way, grouping functionality by entity.
+This makes code easier to study, remember, apply, and reuse.
+
+- Do not split code into many tiny files.
+- Do not overload methods and files with multiple unrelated responsibilities.
+- Each logical block must be written as a separate function.
+
+### 6. Anticipate All Behavioral Scenarios
+
+Identify and account for all possible code behavior scenarios depending on incoming data.
+Analyze: empty values, unexpected types, unavailable resources, boundary conditions.
+Evaluate each scenario against the current task requirements and expected behavior —
+not every edge case requires handling, but every case must be consciously considered.
+
+### 7. Scoped Changes and Controlled Refactoring
+
+Only change what is directly necessary for the current task.
+Do not refactor unrelated code along the way — unless it is a pattern used by the current task
+or inherits from it. In that case, do not silently refactor it either:
+propose the fix for discussion and approval before applying.
+Do not add unused abstractions "for the future" —
+but design the code being written so that it can naturally be reused in future tasks.
+
+### 8. State Assumptions and Uncertainties Explicitly
+
+Never guess silently. If something is assumed rather than confirmed —
+state it explicitly before proceeding.
+Flag unclear requirements, ambiguous context, or missing information
+so that decisions are made consciously, not accidentally.
+
+### 9. Report All Bugs — Fix Only Task-Related Issues
+
+Report every bug discovered; never ignore or fix them silently.
+Inside current task: Fix it immediately.
+Outside current task: Report it, pause the current task, and wait for a response before proceeding. Do not apply the fix without explicit approval.
+
+### 10. Naming Conventions — Files vs Identifiers
+
+A file is named after its primary export, using that export's casing:
+**PascalCase** for classes/components (`components/BabylonEditor.jsx`,
+`components/VSCodeFSProvider.js`), **camelCase** for single-function modules
+(`utils/parseGlb.js`, `utils/determineMimeType.js`). Files without a single
+named primary export (stylesheets, entry points, infrastructure modules) and
+folders use **kebab-case** (`utils/jsx-runtime.js`, `scss/editor.scss`).
+When in doubt, follow the convention already used in the target directory.
+Do not rename existing files just to match this rule.
+
+Identifiers in code (variables, functions, types, components, named exports) use
+**PascalCase** for types/components/classes and **camelCase** for variables/functions —
+matching their JavaScript semantics. Lowercase JSX tags are native HTML elements;
+note that the custom JSX runtime does not render function components
+(`<MyComponent/>`), so compose markup by calling functions that return JSX strings.
+
+Conventional uppercase markdown files (`README.md`, `AGENTS.md`, `CLAUDE.md`,
+`LICENSE.md`) keep their canonical casing.
+
+### 11. No Comments in SCSS
+
+Do not write comments inside `*.scss` files (no `//` and no `/* */`).
+The selector tree itself (`.block { &__elem { ... } }`) is the documentation;
+class names follow BEM and CSS variables are self-describing. If a rule needs
+explanation, the explanation belongs in the component's JSX/markdown, not the
+stylesheet. Move existing helpful notes out when you touch surrounding code.
+
+### 12. Group SCSS Selectors by BEM Prefix
+
+Do not write SCSS as a flat list of sibling selectors. Nest sub-elements
+inside their parent block using `&-suffix` chains so each "section" collapses
+to a single foldable group in the IDE. Apply to every BEM family
+(`&__a`, `&__a-b`, `&__a-c` → nest `&-b` and `&-c` inside `&__a`). Modifiers of
+the same element (`&--variant`), pseudo-elements (`&::before`), and descendant
+overrides (`.card-header` inside the block) all go inside their owning selector —
+never as siblings on the root level.

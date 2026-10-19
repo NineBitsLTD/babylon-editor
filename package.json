@@ -1,0 +1,270 @@
+{
+  "name": "babylon-editor",
+  "displayName": "Babylon Editor",
+  "description": "",
+  "version": "1.2.0",
+  "publisher": "ninebits",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.107.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onFileSystem:babylon-text",
+    "onLanguage:json",
+    "onFileSystem:babylon-model"
+  ],
+  "main": "dist/extension.cjs",
+  "contributes": {
+    "languages": [
+      {
+        "id": "json",
+        "extensions": [
+          ".babylon",
+          ".gltf",
+          ".gltf2"
+        ]
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "babylon-editor.editor",
+        "displayName": "BABYLON Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.{glb,gltf,gltf2,obj,stl,ply,splat,spz}"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "babylon-editor.textEditor",
+        "displayName": "BABYLON Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.babylon"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "babylon-editor.openCollapsedText",
+        "title": "Open as Compact Text",
+        "category": "Babylon",
+        "icon": "$(json)"
+      },
+      {
+        "command": "babylon-editor.expandFragment",
+        "title": "Expand Cut-out Values",
+        "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.openRawText",
+        "title": "Open as Raw Text",
+        "category": "Babylon",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "babylon-editor.tree.add",
+        "title": "Add…",
+        "category": "Babylon",
+        "icon": "$(add)"
+      },
+      {
+        "command": "babylon-editor.tree.rename",
+        "title": "Rename…",
+        "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.tree.delete",
+        "title": "Delete",
+        "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.tree.click",
+        "title": "Show in the Inspector",
+        "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.save",
+        "title": "Save (check that the model loads first)",
+        "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.openInModelEditor",
+        "title": "Open in Babylon Editor",
+        "category": "Babylon",
+        "icon": {
+          "light": "resources/open-model-light.svg",
+          "dark": "resources/open-model-dark.svg"
+        }
+      },
+      {
+        "command": "babylon-editor.saveAs",
+        "title": "Save Model As…",
+        "category": "Babylon"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "babylon-editor.save",
+        "key": "ctrl+s",
+        "mac": "cmd+s",
+        "when": "resourceExtname == .babylon"
+      },
+      {
+        "command": "babylon-editor.saveAs",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s",
+        "when": "resourceExtname == .babylon"
+      }
+    ],
+    "configuration": {
+      "title": "Babylon Editor",
+      "properties": {
+        "babylonEditor.collapseTextEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open .babylon files in the collapsed text view (vertex buffers, animation keys and embedded textures replaced by placeholders) when they are opened in a text editor. Use 'Babylon: Open as Raw Text' for the unchanged file."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "babylon-editor.openInModelEditor",
+          "when": "resourceScheme == babylon-text || (resourceScheme == file || resourceScheme == babylon-model) && resourceExtname =~ /^\\.(babylon|glb|gltf|gltf2|obj|stl|ply|splat|spz)$/i && !activeCustomEditorId",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openCollapsedText",
+          "when": "(resourceScheme == file || resourceScheme == babylon-model) && resourceExtname == .babylon && !activeCustomEditorId",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openRawText",
+          "when": "resourceScheme == babylon-text",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openCollapsedText",
+          "when": "activeCustomEditorId == babylon-editor.textEditor",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openRawText",
+          "when": "activeCustomEditorId == babylon-editor.textEditor",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "babylon-editor.openRawText",
+          "when": "resourceExtname == .babylon",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openCollapsedText",
+          "when": "resourceExtname == .babylon",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "babylon-editor.tree.add",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^section:(Nodes|Materials|Textures|Skeletons|Animations|Cameras|Lights)$/",
+          "group": "inline"
+        },
+        {
+          "command": "babylon-editor.tree.add",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^section:(Nodes|Materials|Textures|Skeletons|Animations|Cameras|Lights)$/",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "babylon-editor.tree.rename",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^item:(node|material|skeleton|clip|camera|light)$/",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "babylon-editor.tree.delete",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^item:(?!timeline$)/",
+          "group": "1_edit@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "babylon-editor.tree.add",
+          "when": "false"
+        },
+        {
+          "command": "babylon-editor.tree.rename",
+          "when": "false"
+        },
+        {
+          "command": "babylon-editor.tree.delete",
+          "when": "false"
+        },
+        {
+          "command": "babylon-editor.tree.click",
+          "when": "false"
+        },
+        {
+          "command": "babylon-editor.expandFragment",
+          "when": "false"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "babylon-editor.modelTree",
+          "name": "Babylon Model",
+          "when": "babylonEditor.active"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies",
+    "clean": "rm -rf dist",
+    "clean:css-temp": "rm -f src/scss/*.css*",
+    "copy:assets": "cp -R public/* dist/ 2>/dev/null || true",
+    "copy:codicons": "mkdir -p dist/codicons && cp node_modules/@vscode/codicons/dist/codicon.css node_modules/@vscode/codicons/dist/codicon.ttf dist/codicons/",
+    "compile:sass": "sass src/scss:src/scss",
+    "build:js": "esbuild src/extension.js --bundle --minify --outfile=dist/extension.cjs --loader:.jsx=jsx --jsx=automatic --jsx-import-source=./utils --external:vscode --platform=node --format=cjs",
+    "build:js-editor": "esbuild src/editor.js --bundle --minify --outdir=dist/js",
+    "build:css": "npm run compile:sass && esbuild src/scss/*.css --bundle --minify --outdir=dist/css --loader:.css=css && npm run clean:css-temp",
+    "build": "npm run clean && npm run build:js && npm run build:js-editor && npm run build:css && npm run copy:codicons && npm run copy:assets",
+    "watch:js": "esbuild src/extension.js --bundle --outfile=dist/extension.cjs --loader:.jsx=jsx --jsx=automatic --jsx-import-source=./utils --external:vscode --platform=node --format=cjs --watch",
+    "watch:js-editor": "esbuild src/editor.js --bundle --outdir=dist/js --watch",
+    "watch:css": "sass --watch --no-source-map src/scss:dist/css",
+    "watch:assets": "npx onchange 'public/**/*' -- npm run copy:assets",
+    "watch": "npm run build && concurrently 'npm:watch:*'"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.107.0",
+    "@vscode/vsce": "^4.0.0",
+    "concurrently": "^9.2.1",
+    "esbuild": "^0.27.1",
+    "eslint": "^9.39.1",
+    "onchange": "^7.1.0",
+    "sass": "^1.96.0"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^8.41.1",
+    "@babylonjs/gui": "^8.41.1",
+    "@babylonjs/loaders": "^8.41.1",
+    "@babylonjs/materials": "^8.41.1",
+    "@babylonjs/procedural-textures": "^8.41.1",
+    "@babylonjs/serializers": "^8.41.1",
+    "@blueprintjs/core": "^6.4.1",
+    "@vscode/codicons": "^0.0.44"
+  }
+}

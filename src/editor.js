@@ -1,0 +1,972 @@
+import * as BABYLON from '@babylonjs/core';
+import '@babylonjs/loaders';
+import { AnimationController } from './editor/AnimationController';
+import { BabylonJsonBinding } from './editor/BabylonJsonBinding';
+import { CameraController } from './editor/CameraController';
+import { ClipFrameEditor } from './editor/ClipFrameEditor';
+import { DocumentEditHistory, EditHistory } from './editor/EditHistory';
+import { FileInfo } from './editor/FileInfo';
+import { HostRequests } from './editor/HostRequests';
+import { ModelConverter } from './editor/ModelConverter';
+import { ModelEdits, objectOf } from './editor/ModelEdits';
+import { ModelOutline } from './editor/ModelOutline';
+import { ModelTreeBridge } from './editor/ModelTreeBridge';
+import { PanelResizer } from './editor/PanelResizer';
+import { ModelProperties } from './editor/ModelProperties';
+import { ModelSerializer } from './editor/ModelSerializer';
+import { PropertyPanel } from './editor/PropertyPanel';
+import { SelectionHighlighter } from './editor/SelectionHighlighter';
+import { TextureImage } from './editor/TextureImage';
+import { Toolbar } from './editor/Toolbar';
+
+const vscode = acquireVsCodeApi();
+
+/** Below this width (px) of the editor the model and the inspector are shown one at a time. */
+const NARROW_WIDTH = 500;
+
+/**
+ * View settings (view, singleView, renderMode, uvColor, showUv): this panel's own (restored with the panel),
+ * else the last ones chosen in any editor (kept by the host, so a newly opened file starts with them).
+ * @returns {{ view?: string, singleView?: string, renderMode?: string, uvColor?: string, showUv?: boolean }}
+ */
+function viewSettings() {
+    const own = vscode.getState() ?? {};
+    const shared = window.payload?.viewSettings ?? {};
+    return {
+        view: own.view ?? shared.view,
+        singleView: own.singleView ?? shared.singleView,
+        renderMode: own.renderMode ?? shared.renderMode,
+        uvColor: own.uvColor ?? shared.uvColor,
+        showUv: own.showUv ?? shared.showUv,
+    };
+}
+
+/**
+ * Keeps changed view settings in this panel's state and with the host for the next opened files.
+ * @param {{ view?: string, singleView?: string, renderMode?: string, uvColor?: string, showUv?: boolean }} changes
+ */
+function saveViewSettings(changes) {
+    vscode.setState({ ...vscode.getState(), ...changes });
+    vscode.postMessage({ type: 'viewSettings', settings: changes });
+}
+
+/**
+ * Shows a status line over the editor (loading progress, errors). An empty text hides it.
+ * @param {string} text
+ * @param {boolean} [isError]
+ */
+function setStatus(text, isError = false) {
+    const status = document.querySelector('.status');
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('status--hidden', !text);
+    status.classList.toggle('status--error', isError);
+}
+
+/**
+ * Creates the engine and an empty scene bound to the editor canvas.
+ * @param {HTMLCanvasElement} canvas
+ * @returns {BABYLON.Scene}
+ */
+function createScene(canvas) {
+    const engine = new BABYLON.Engine(canvas, true);
+    const scene = new BABYLON.Scene(engine);
+    // The camera is created after the first model is loaded; rendering without it throws
+    engine.runRenderLoop(() => scene.activeCamera && scene.render());
+    // The canvas also changes size when the edit panels are shown or hidden
+    new ResizeObserver(() => engine.resize()).observe(canvas);
+    return scene;
+}
+
+/**
+ * Wires the scene, the toolbar, the edit panels and the extension host messages together.
+ */
+class Editor {
+
+    /**
+     * @param {HTMLElement} root the `.editor` element
+     */
+    constructor(root) {
+        this._root = root;
+        this._type = window.payload?.type || '';
+        // The model is a text document (.babylon): edits become patches of the text, VS Code keeps the undo stack
+        this._textBacked = !!window.payload?.textBacked;
+        this._canEdit = this._textBacked || ModelSerializer.canSave(this._type);
+        /** @type {BabylonJsonBinding | null} */
+        this._binding = null;
+        /** @type {import('./editor/FileInfo').FileField[] | null} */
+        this._fileFields = null;
+        this._scene = createScene(/** @type {HTMLCanvasElement} */ (root.querySelector('.canvas')));
+        this._camera = new CameraController(this._scene);
+        this._animations = new AnimationController(this._scene);
+        this._highlighter = new SelectionHighlighter(this._scene);
+        const skeletonDisplay = vscode.getState()?.skeletonDisplay;
+        if (skeletonDisplay) this._highlighter.setSkeletonDisplay(skeletonDisplay);
+        /** @type {BABYLON.AssetContainer | null} */
+        this._container = null;
+        /** @type {import('./editor/ModelSerializer').SourceInfo | null} */
+        this._source = null;
+        /** @type {import('./editor/ModelOutline').TreeItem | null} */
+        this._selection = null;
+
+        this._history = this._textBacked
+            ? new DocumentEditHistory({
+                collect: () => this._binding?.collect() ?? [],
+                onPatches: (label, patches) => vscode.postMessage({ type: 'patch', label, patches }),
+                onChange: () => this._refresh(),
+            })
+            : new EditHistory({
+                onExecute: (command) => vscode.postMessage({ type: 'edit', label: command.label }),
+                onChange: () => this._refresh(),
+            });
+        // The model tree is rendered by VS Code in the Explorer; this bridge answers its requests
+        this._tree = new ModelTreeBridge(item => this._annotateTreeItem(item));
+        /** @type {Map<object, 'modified' | 'added'>} objects changed since the last save (formats other than .babylon) */
+        this._changed = new Map();
+        /** @type {Map<BABYLON.AbstractMesh, number>} meshes hidden in the 3D view only, with their layer mask */
+        this._hiddenInView = new Map();
+        /** @type {Map<string, import('./editor/ModelOutline').ModelItemData>} nodes listed in the inspector, by the id tree commands use */
+        this._inspectorObjects = new Map();
+        this._panel = new PropertyPanel(root.querySelector('.inspector'), {
+            onCommit: (property, value) => this._commitProperty(property, value),
+            onCellCommit: (column, row, oldValue, newValue) => this._commitCell(column, row, oldValue, newValue),
+            onCurveCommit: (data, row, label, before, after) => this._commitCurve(data, row, label, before, after),
+        });
+        this._panel.setReadOnly(!this._canEdit);
+        // The inspector width survives hiding the editor tab (webview state)
+        this._resizer = new PanelResizer(root.querySelector('.splitter'), root.querySelector('.inspector'), {
+            defaultWidth: 460,
+            width: vscode.getState()?.inspectorWidth,
+            onChange: (width) => {
+                vscode.setState({ ...vscode.getState(), inspectorWidth: width });
+                this._updateLayout();
+            },
+        });
+        this._toolbar = this._createToolbar(root);
+        // The model, the inspector or both (desktop), switched from the toolbar and kept in the
+        // webview state; a narrow editor shows the last single view instead of both
+        const { view = 'desktop', singleView = 'inspector' } = viewSettings();
+        /** @type {import('./editor/Toolbar').EditorView} */
+        this._view = view;
+        /** @type {'model' | 'inspector'} */
+        this._singleView = singleView;
+        this._narrow = false;
+        /** @type {import('./editor/Toolbar').EditorView | null} */
+        this._shown = null;
+        new ResizeObserver(() => this._updateLayout()).observe(root.querySelector('.workspace'));
+        this._setRenderMode(viewSettings().renderMode ?? 'textured');
+        this._edits = new ModelEdits({
+            scene: this._scene,
+            container: () => this._container,
+            animations: this._animations,
+            history: this._history,
+            binding: () => this._binding,
+            rootUrl: window.payload?.rootUrl ?? '',
+            postOps: (label, ops) => vscode.postMessage({ type: 'documentOps', label, ops }),
+            onStructureChange: () => this._rebuildModel(),
+            markChanged: (object, state) => this._markChanged(object, state),
+        });
+        this._host = new HostRequests(message => vscode.postMessage(message));
+        this._textureImage = new TextureImage({
+            host: this._host,
+            replace: (texture, dataUrl) => {
+                if (this._canEdit) this._edits.replaceTextureImage(texture, dataUrl);
+            },
+            container: () => this._container,
+            uvColor: viewSettings().uvColor,
+            showUv: viewSettings().showUv,
+            onShowUvChange: shown => saveViewSettings({ showUv: shown }),
+            // The picker reports every step of a drag: the last color is kept
+            onUvColorChange: (color) => {
+                clearTimeout(this._uvColorTimer);
+                this._uvColorTimer = setTimeout(() => saveViewSettings({ uvColor: color }), 300);
+            },
+        });
+        this._listenBonePicks();
+    }
+
+    /**
+     * Change information of a tree item for its decoration: where its object is in the `.babylon`
+     * text (the host compares it with the saved file), or whether it was changed since the save.
+     * @param {import('./editor/ModelOutline').TreeItem} item
+     * @returns {{ source?: import('./editor/ModelTreeBridge').TreeItemSource, state?: 'modified' | 'added' }}
+     */
+    _annotateTreeItem(item) {
+        const data = item.data;
+        if (!data || data.kind === 'section') return {};
+        const object = objectOf(data);
+        if (!object) return {};
+        if (!this._binding) return this._changed.has(object) ? { state: this._changed.get(object) } : {};
+        const binding = this._binding;
+        if (data.kind === 'clip') {
+            const owner = this._container.skeletons.find(skeleton => skeleton.getAnimationRange(object.name));
+            const path = owner && binding.pathOf(owner);
+            return path ? { source: { array: [...path, 'ranges'], key: 'name', id: object.name } } : {};
+        }
+        if (data.kind === 'texture') {
+            const path = binding.pathOf(object);
+            const material = path && this._container.materials.find(candidate => binding.pathOf(candidate)?.[1] === path[1]);
+            return material ? { source: { array: ['materials'], key: 'id', id: material.id, field: path[2] } } : {};
+        }
+        const path = binding.pathOf(object);
+        if (!path) return {};
+        if (data.kind === 'shadowGenerator') return { source: { array: path.slice(0, -1), key: 'lightId', id: object.getLight().id } };
+        return { source: { array: path.slice(0, -1), key: 'id', id: object.id } };
+    }
+
+    /**
+     * @param {object} object
+     * @param {'modified' | 'added'} state
+     */
+    _markChanged(object, state) {
+        if (this._binding || !object || this._changed.get(object) === 'added') return;
+        this._changed.set(object, state);
+    }
+
+    /**
+     * The frame the current clip stopped at (pause, seek) becomes the frame of the clip inspector.
+     */
+    _syncClipFrame() {
+        const clip = this._animations.current;
+        if (!clip) return;
+        ClipFrameEditor.setShownFrame(clip, this._animations.currentFrame);
+        // The pose follows the whole frame the inspector shows
+        this._animations.showFrame(clip, ClipFrameEditor.shownFrame(clip));
+        this._panel.refresh();
+        this._panel.updateCurrentFrame();
+    }
+
+    /** Shows the chosen view; an editor too narrow for both shows the last single view. */
+    _updateLayout() {
+        const workspace = this._root.querySelector('.workspace');
+        this._narrow = workspace.clientWidth < NARROW_WIDTH;
+        // A model view too narrow for its player (next to the inspector) shows the model alone
+        const splitter = /** @type {HTMLElement} */ (this._root.querySelector('.splitter'));
+        this._splitterWidth = splitter.offsetWidth || this._splitterWidth || 0;
+        const cramped = !this._narrow && workspace.clientWidth - this._resizer.width - this._splitterWidth < this._playerWidth();
+        const shown = this._view !== 'desktop' ? this._view : this._narrow ? this._singleView : cramped ? 'model' : 'desktop';
+        const inspector = /** @type {HTMLElement} */ (this._root.querySelector('.inspector'));
+        // The inspector alone takes the whole width; its own width comes back with the desktop view
+        if (shown !== this._shown) {
+            this._shown = shown;
+            if (shown === 'desktop') this._resizer.setWidth(this._resizer.width);
+            else inspector.style.flexBasis = 'auto';
+        }
+        this._root.classList.toggle('editor--model', shown === 'model');
+        this._root.classList.toggle('editor--inspector', shown === 'inspector');
+        this._toolbar.setLayout(shown, this._narrow || cramped);
+    }
+
+    /**
+     * @returns {number} the width the model view needs for its player in one line (the controls at
+     *   their smallest, the slider at its minimum); measured while the view is shown
+     */
+    _playerWidth() {
+        const player = /** @type {HTMLElement} */ (this._root.querySelector('.player'));
+        const controls = /** @type {HTMLElement} */ (this._root.querySelector('.player__controls'));
+        if (controls.offsetParent) {
+            const { width } = controls.style;
+            controls.style.width = 'min-content';
+            const style = getComputedStyle(player);
+            this._minPlayerWidth = controls.getBoundingClientRect().width + parseFloat(style.left) + parseFloat(style.right);
+            controls.style.width = width;
+        }
+        return this._minPlayerWidth ?? 0;
+    }
+
+    /** After an object was added or deleted in the scene (formats other than .babylon). */
+    _rebuildModel() {
+        this._highlighter.clear();
+        this._animations.dispose();
+        this._animations.setContainer(this._container);
+        this._tree.reset(ModelOutline.build(this._container, this._animations, this._type));
+        this._inspectorObjects.clear();
+        this._hiddenInView.clear();
+        vscode.postMessage({ type: 'treeReset' });
+        this._toolbar.setClip(this._animations.current?.name ?? null);
+        // The player is wider with animation controls: it may no longer fit next to the inspector
+        this._updateLayout();
+        this._toolbar.setPlaying(this._animations.isPlaying);
+        this._showFile();
+    }
+
+    /**
+     * Runs a command of the tree context menu (the host asks for names and confirmations).
+     * @param {{ requestId: number, op: string, id?: string, name?: string, section?: string, kind?: string, extra?: object }} message
+     * @returns {any} the result for the host
+     */
+    _runTreeCommand({ op, id, name, section, kind, extra }) {
+        if (!this._container) throw new Error('No model is loaded');
+        if (!this._canEdit && op !== 'info') throw new Error(`Editing .${this._type} files is not supported`);
+        const data = id ? (this._tree.get(id) ?? { data: this._inspectorObjects.get(id) })?.data : null;
+        if (id && !data) throw new Error('The item no longer exists');
+        switch (op) {
+            case 'info': return this._edits.info(data);
+            case 'textureTargets': return this._edits.textureTargets();
+            case 'rename': return this._edits.rename(data, name);
+            case 'delete': return this._edits.delete(data);
+            case 'add': return this._edits.add(section, kind, name, extra);
+            default: throw new Error(`Unknown command ${op}`);
+        }
+    }
+
+    /** A click (not a camera drag) on a bone in the 3D view selects it; a click on the selected bone deselects it. */
+    _listenBonePicks() {
+        this._scene.onPointerObservable.add((info) => {
+            // A quick second click is reported as a double tap; it toggles the selection too
+            const { POINTERTAP, POINTERDOUBLETAP } = BABYLON.PointerEventTypes;
+            if (info.type !== POINTERTAP && info.type !== POINTERDOUBLETAP) return;
+            const bone = this._highlighter.pickBone(this._scene.pointerX, this._scene.pointerY);
+            if (bone) this._revealBone(bone);
+        });
+    }
+
+    /**
+     * Shows a bone picked in the 3D view: its record in the clip table / graph,
+     * otherwise the bone inspector.
+     * @param {BABYLON.Bone} bone
+     */
+    _revealBone(bone) {
+        if (bone === this._highlighter.selectedBone) {
+            this._highlighter.selectBone(null);
+            this._panel.clearRowSelection();
+            return;
+        }
+        this._highlighter.selectBone(bone);
+        if (this._panel.revealObject(bone)) {
+            this._panel.refreshActions();
+            return;
+        }
+        this._select({ id: `picked-bone:${bone.uniqueId}`, label: () => bone.name, data: { kind: 'bone', bone } });
+    }
+
+    /**
+     * @param {HTMLElement} element the editor root (toolbar and player controls)
+     * @returns {Toolbar}
+     */
+    _createToolbar(element) {
+        const toolbar = new Toolbar(element, {
+            onToggleOrbit: () => {
+                this._camera.toggleAutoOrbit();
+                toolbar.setOrbit(this._camera.autoOrbit);
+                // Actions may depend on the camera / playback state (Rest / Bind pose)
+                this._panel.refreshActions();
+            },
+            onTogglePlay: () => {
+                this._animations.toggle();
+                toolbar.setPlaying(this._animations.isPlaying);
+                if (!this._animations.isPlaying) this._syncClipFrame();
+                // The clip inspector shows Play or Pause depending on the playback state
+                this._panel.refreshActions();
+            },
+            onSeek: (progress) => {
+                this._animations.seek(progress);
+                if (this._animations.isPlaying) {
+                    this._panel.refreshActions();
+                } else {
+                    this._syncClipFrame();
+                }
+            },
+            onSelectRenderMode: (mode) => {
+                this._setRenderMode(mode);
+                saveViewSettings({ renderMode: mode });
+            },
+            onSelectView: (view) => {
+                this._view = view;
+                if (view !== 'desktop') this._singleView = view;
+                saveViewSettings({ view, singleView: this._singleView });
+                this._updateLayout();
+            },
+            onResetView: () => this._camera.resetView(),
+            onToggleMesh: () => this._toggleSkeletonDisplay('mesh'),
+            onToggleBones: () => this._toggleSkeletonDisplay('bones'),
+        });
+        toolbar.setOrbit(this._camera.autoOrbit);
+        toolbar.setPlaying(false);
+        toolbar.setClip(null);
+        toolbar.setSkeletonMode(false, this._highlighter.skeletonDisplay);
+        this._scene.onAfterRenderObservable.add(() => {
+            if (this._animations.current) {
+                toolbar.setProgress(this._animations.getProgress());
+            }
+            if (this._animations.isPlaying && this._selection?.data.kind === 'clip') this._panel.updateCurrentFrame();
+        });
+        return toolbar;
+    }
+
+    /**
+     * Replaces the current model with the one contained in the given bytes.
+     * Data is wrapped into a File so every registered loader (including the
+     * text-based .babylon loader, which cannot read an ArrayBufferView) can parse it;
+     * relative resources (textures, .bin, .mtl) are resolved against payload.rootUrl.
+     * @param {ArrayBuffer | Uint8Array} data
+     * @param {{ keepView?: boolean }} [options] keepView - a reload after a document change: the camera,
+     *   the current clip and frame and the selected object are kept
+     */
+    async loadModel(data, { keepView = false } = {}) {
+        const { fileName = `model.${this._type}`, rootUrl = '' } = window.payload || {};
+        setStatus('Loading…');
+        const view = keepView ? this._captureView() : null;
+        try {
+            const file = new File([data], fileName);
+            const container = await BABYLON.LoadAssetContainerAsync(file, this._scene, { rootUrl });
+            const binding = this._textBacked
+                ? new BabylonJsonBinding(JSON.parse(new TextDecoder().decode(data)), container, this._scene, rootUrl)
+                : null;
+            this._highlighter.clear();
+            this._toolbar.setSkeletonMode(false, this._highlighter.skeletonDisplay);
+            this._animations.dispose();
+            this._container?.dispose();
+            this._container = container;
+            this._binding = binding;
+            this._source = this._textBacked ? null : ModelSerializer.inspectSource(this._type, data);
+            container.addAllToScene();
+            if (!view) this._camera.frame({ frontIsPositiveZ: this._isGltfModel() });
+            this._animations.setContainer(container);
+            this._history.clear();
+            this._changed.clear();
+            this._fileFields = this._textBacked ? null : FileInfo.read(this._type, data);
+            this._tree.reset(ModelOutline.build(container, this._animations, this._type));
+            this._inspectorObjects.clear();
+            this._hiddenInView.clear();
+            vscode.postMessage({ type: 'treeReset' });
+            this._toolbar.setClip(this._animations.current?.name ?? null);
+            // The player is wider with animation controls: it may no longer fit next to the inspector
+            this._updateLayout();
+            this._toolbar.setPlaying(this._animations.isPlaying);
+            if (view) {
+                this._restoreView(view);
+            } else {
+                this._showFile();
+            }
+            setStatus('');
+        } catch (error) {
+            console.error('[BabylonEditor] Failed to load model', error);
+            const detail = error?.message || String(error);
+            setStatus(this._textBacked
+                ? `File format error: ${detail}. Fix the file in the source text or undo the changes.`
+                : `Failed to load model: ${detail}`, true);
+        }
+    }
+
+    /**
+     * State kept across a reload of the model after a document change.
+     * @returns {{ camera: object | null, clip: string | null, frame: number, selection: { kind: string, label: string } | null }}
+     */
+    _captureView() {
+        const camera = this._scene.activeCamera;
+        return {
+            camera: camera instanceof BABYLON.ArcRotateCamera
+                ? { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() }
+                : null,
+            clip: this._animations.current?.name ?? null,
+            frame: this._animations.currentFrame,
+            selection: this._selection ? { kind: this._selection.data.kind, label: this._selection.label() } : null,
+            hiddenInView: [...this._hiddenInView.keys()].map(mesh => mesh.name),
+        };
+    }
+
+    /**
+     * @param {ReturnType<Editor['_captureView']>} view
+     */
+    _restoreView(view) {
+        // Parts hidden in the 3D view stay hidden (matched by name: the reloaded meshes are new objects)
+        const hidden = new Set(view.hiddenInView);
+        this._container.meshes.filter(mesh => hidden.has(mesh.name)).forEach(mesh => this._setHiddenInView(mesh, true));
+        const camera = this._scene.activeCamera;
+        if (view.camera && camera instanceof BABYLON.ArcRotateCamera) {
+            Object.assign(camera, { alpha: view.camera.alpha, beta: view.camera.beta, radius: view.camera.radius });
+            camera.setTarget(view.camera.target);
+        }
+        const clip = this._animations.findClip(view.clip);
+        if (clip) this._propertiesContext().showFrame(clip, view.frame);
+        const item = view.selection && this._findTreeItem(this._tree.getRoots(), view.selection);
+        const node = !item && view.selection?.kind === 'node' ? this._findListedNode(view.selection.label) : null;
+        if (item) {
+            this._select(item);
+        } else if (node) {
+            this._openNodeFromTree(node);
+        } else {
+            this._showFile();
+        }
+    }
+
+    /**
+     * @param {string} name
+     * @returns {BABYLON.TransformNode | null} a node of the model that is listed in the inspector of a root node
+     */
+    _findListedNode(name) {
+        return [...this._container.meshes, ...this._container.transformNodes].find(node => node.parent && node.name === name) ?? null;
+    }
+
+    /**
+     * Opens a node listed in the inspector of its root node; back returns to the root node.
+     * @param {BABYLON.TransformNode} node
+     */
+    _openNodeFromTree(node) {
+        let root = node;
+        while (root.parent) root = root.parent;
+        const rootItem = this._findTreeItem(this._tree.getRoots(), { kind: 'node', label: root.name });
+        this._openObject({ kind: 'node', node }, rootItem);
+    }
+
+    /** Shows the file fields in the inspector (nothing of the tree is selected). */
+    _showFile() {
+        const { fileName = `model.${this._type}` } = window.payload || {};
+        this._select({ id: 'file', label: () => fileName, data: { kind: 'file' } });
+    }
+
+    /**
+     * Finds a tree item by kind and label (depth-first, creating lazy children).
+     * @param {import('./editor/ModelOutline').TreeItem[]} items
+     * @param {{ kind: string, label: string }} wanted
+     * @param {number} [depth]
+     * @returns {import('./editor/ModelOutline').TreeItem | null}
+     */
+    _findTreeItem(items, wanted, depth = 0) {
+        for (const item of items) {
+            if (item.data?.kind === wanted.kind && item.label() === wanted.label) return item;
+            if (item.children && depth < 8) {
+                const found = this._findTreeItem(item.children(), wanted, depth + 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Applies changes of the text document (typing, undo/redo, other editors) to the model.
+     * @param {import('./editor/BabylonJsonBinding').JsonPatch[]} patches
+     */
+    _applyDocumentPatches(patches) {
+        if (!this._binding) return;
+        // The text is valid again
+        setStatus('');
+        if (!this._binding.apply(patches)) {
+            vscode.postMessage({ type: 'requestReload' });
+            return;
+        }
+        this._animations.refreshPose();
+        this._refresh();
+    }
+
+    /**
+     * Checks that model data loads and renders, in a separate scene (the shown model is not touched).
+     * @param {ArrayBuffer} data
+     * @returns {Promise<string | null>} the error, or null when the model is fine
+     */
+    async validate(data) {
+        const { fileName = `model.${this._type}`, rootUrl = '' } = window.payload || {};
+        const scene = new BABYLON.Scene(this._scene.getEngine());
+        try {
+            if (this._textBacked) JSON.parse(new TextDecoder().decode(data));
+            const container = await BABYLON.LoadAssetContainerAsync(new File([data], fileName), scene, { rootUrl });
+            container.addAllToScene();
+            // Compiles the materials (shader errors show up here) and loads the textures; no frame is
+            // drawn, so the shown model does not flicker
+            await scene.whenReadyAsync();
+            return null;
+        } catch (error) {
+            return String(error?.message || error);
+        } finally {
+            scene.dispose();
+        }
+    }
+
+    /**
+     * Converts a model file into a `.babylon` document (in a separate scene) for the host.
+     * @param {{ requestId: number, data: ArrayBuffer, fileName: string, producer?: object }} message
+     */
+    async _convertModel({ requestId, data, fileName, producer }) {
+        const { rootUrl = '' } = window.payload || {};
+        setStatus(`Converting ${fileName} to .babylon…`);
+        try {
+            const { text, source } = await ModelConverter.toBabylon({ engine: this._scene.getEngine(), data, fileName, rootUrl, producer });
+            vscode.postMessage({ type: 'converted', requestId, data: new TextEncoder().encode(text).buffer, source });
+        } catch (error) {
+            console.error('[BabylonEditor] Failed to convert the model', error);
+            vscode.postMessage({ type: 'converted', requestId, error: String(error?.message || error) });
+        } finally {
+            setStatus('');
+        }
+    }
+
+    /**
+     * Converts a `.babylon` document into a model format (in a separate scene) for the host.
+     * @param {{ requestId: number, data: ArrayBuffer, format: string, source?: import('./editor/ModelSerializer').SourceInfo }} message
+     */
+    async _exportModel({ requestId, data, format, source }) {
+        const { rootUrl = '' } = window.payload || {};
+        try {
+            const result = await ModelConverter.fromBabylon({ engine: this._scene.getEngine(), data, type: format, source, rootUrl });
+            vscode.postMessage({ type: 'exported', requestId, data: result });
+        } catch (error) {
+            console.error('[BabylonEditor] Failed to export the model', error);
+            vscode.postMessage({ type: 'exported', requestId, error: String(error?.message || error) });
+        }
+    }
+
+    /**
+     * Regenerates the file content from the scene in the original format.
+     * @returns {Promise<ArrayBuffer>}
+     */
+    async serialize() {
+        if (!this._container) throw new Error('No model is loaded');
+        // Highlight helpers (outlines, bones, markers) and hidden meshes must not end up in the file
+        const selectedBone = this._highlighter.selectedBone;
+        this._highlighter.clear();
+        // Parts hidden in the 3D view only are written as they are
+        const hidden = [...this._hiddenInView.keys()];
+        hidden.forEach(mesh => this._setHiddenInView(mesh, false));
+        try {
+            return await ModelSerializer.serialize({
+                type: this._type,
+                scene: this._scene,
+                container: this._container,
+                source: this._source,
+            });
+        } finally {
+            hidden.forEach(mesh => this._setHiddenInView(mesh, true));
+            if (this._selection) {
+                this._highlight(this._selection.data);
+                this._highlighter.selectBone(selectedBone);
+            }
+        }
+    }
+
+    /**
+     * @returns {import('./editor/ModelProperties').PropertiesContext}
+     */
+    _propertiesContext() {
+        return {
+            fileType: this._type,
+            container: this._container,
+            animations: this._animations,
+            highlighter: this._highlighter,
+            history: this._history,
+            selectClip: (index) => this._selectClip(index),
+            playClip: (index) => this._playClip(index),
+            pauseAnimation: () => {
+                this._animations.pause();
+                this._toolbar.setPlaying(false);
+                this._syncClipFrame();
+            },
+            showPose: (skeleton, pose) => {
+                this._camera.setAutoOrbit(false);
+                this._toolbar.setOrbit(false);
+                this._animations.showPose(skeleton, pose);
+                this._toolbar.setPlaying(false);
+            },
+            isPose: (skeleton, pose) => !this._animations.isPlaying && !this._camera.autoOrbit && this._animations.isPose(skeleton, pose),
+            showFrame: (clip, frame) => {
+                this._animations.showFrame(clip, frame);
+                this._toolbar.setClip(clip.name);
+                this._toolbar.setPlaying(false);
+            },
+            selectedRow: () => this._panel.selectedRow,
+            fileName: window.payload?.fileName || `model.${this._type}`,
+            convertedFrom: window.payload?.convertedFrom ?? null,
+            isHiddenInView: mesh => this._hiddenInView.has(mesh),
+            setHiddenInView: (mesh, hidden) => this._setHiddenInView(mesh, hidden),
+            fileFields: this._fileFields ?? null,
+            documentFields: this._binding?.documentFields ?? null,
+            binding: this._binding,
+            openObject: data => this._openObject(data),
+            objectCommand: (op, data) => this._objectCommand(op, data),
+            textureImage: this._textureImage,
+        };
+    }
+
+    /**
+     * @returns {boolean} the model comes from a glTF file (also when it is edited as a converted
+     *   `.babylon` document): glTF models face +Z
+     */
+    _isGltfModel() {
+        const source = window.payload?.convertedFrom ?? `.${this._type}`;
+        return /\.(glb|gltf|gltf2)$/i.test(source);
+    }
+
+    /**
+     * Shows the model with textures, without them or as lines. Only the view changes: textures are
+     * switched off by Babylon's global material flags and lines by the scene's forced wireframe,
+     * so the materials (and the file) stay as they are.
+     * @param {import('./editor/Toolbar').RenderMode} mode
+     */
+    _setRenderMode(mode) {
+        const textures = mode !== 'solid';
+        for (const flag of Object.getOwnPropertyNames(BABYLON.MaterialFlags)) {
+            if (flag.endsWith('TextureEnabled')) BABYLON.MaterialFlags[flag] = textures;
+        }
+        this._scene.forceWireframe = mode === 'wireframe';
+        this._toolbar.setRenderMode(mode);
+    }
+
+    /**
+     * Hides a mesh in the 3D view through its layer mask: the model is not changed (the `.babylon`
+     * binding does not write the layer mask, and serializing restores it).
+     * @param {BABYLON.AbstractMesh} mesh
+     * @param {boolean} hidden
+     */
+    _setHiddenInView(mesh, hidden) {
+        if (hidden === this._hiddenInView.has(mesh)) return;
+        if (hidden) {
+            this._hiddenInView.set(mesh, mesh.layerMask);
+            mesh.layerMask = 0;
+        } else {
+            mesh.layerMask = this._hiddenInView.get(mesh);
+            this._hiddenInView.delete(mesh);
+        }
+    }
+
+    /**
+     * Shows an object listed in the inspector (a child node or a part of a mesh, a texture of a
+     * material) in its own inspector; its back button returns to the inspector it was opened from.
+     * @param {import('./editor/ModelOutline').ModelItemData} data
+     * @param {import('./editor/ModelOutline').TreeItem | null} [backTo] defaults to the shown item
+     */
+    _openObject(data, backTo = this._selection) {
+        // The tree item stays selected in VS Code; the next click on it opens it again
+        vscode.postMessage({ type: 'treeDeselected' });
+        this._select({ id: this._inspectorObjectId(data), label: () => objectOf(data).name, data }, backTo);
+    }
+
+    /**
+     * Runs a command of the tree context menu (Rename…, Delete) on an object listed in the
+     * inspector: the host asks the user, then sends the command back like one from the tree.
+     * @param {'rename' | 'delete'} op
+     * @param {import('./editor/ModelOutline').ModelItemData} data
+     */
+    _objectCommand(op, data) {
+        vscode.postMessage({ type: 'objectCommand', op, id: this._inspectorObjectId(data) });
+    }
+
+    /**
+     * @param {import('./editor/ModelOutline').ModelItemData} data
+     * @returns {string} id under which tree commands find an object that has no tree item
+     */
+    _inspectorObjectId(data) {
+        const id = `inspector-${data.kind}:${objectOf(data).uniqueId}`;
+        this._inspectorObjects.set(id, data);
+        return id;
+    }
+
+    /**
+     * @param {import('./editor/ModelOutline').TreeItem} item
+     * @param {import('./editor/ModelOutline').TreeItem | null} [backTo] the back button returns to it (else to the file view)
+     */
+    _select(item, backTo = null) {
+        this._selection = item;
+        const context = this._propertiesContext();
+        const content = ModelProperties.describe(item.data, context);
+        if (backTo) {
+            content.back = () => this._select(backTo);
+        } else if (item.data.kind !== 'file') {
+            content.back = () => {
+                // The tree item stays selected in VS Code; the next click on it opens it again
+                vscode.postMessage({ type: 'treeDeselected' });
+                this._showFile();
+            };
+        }
+        if (!this._canEdit) {
+            const reason = `Saving .${this._type} files is not supported, editing is disabled.`;
+            content.notice = content.notice ? `${reason} ${content.notice}` : reason;
+        }
+        this._panel.show(content);
+        this._highlight(item.data);
+    }
+
+    /**
+     * Shows the selected object in the 3D view and syncs the skeleton mode toggles.
+     * @param {import('./editor/ModelOutline').ModelItemData} data
+     */
+    _highlight(data) {
+        ModelProperties.highlight(data, this._propertiesContext());
+        this._toolbar.setSkeletonMode(this._highlighter.isSkeletonMode, this._highlighter.skeletonDisplay);
+        this._updateLayout();
+    }
+
+    /**
+     * Toggles the model meshes or the bones in skeleton mode; the choice is kept in the webview state.
+     * @param {'mesh' | 'bones'} part
+     */
+    _toggleSkeletonDisplay(part) {
+        const display = { ...this._highlighter.skeletonDisplay, [part]: !this._highlighter.skeletonDisplay[part] };
+        this._highlighter.setSkeletonDisplay(display);
+        this._toolbar.setSkeletonMode(this._highlighter.isSkeletonMode, display);
+        vscode.setState({ ...vscode.getState(), skeletonDisplay: display });
+    }
+
+    /**
+     * Shows an item picked in the Explorer tree in the inspector.
+     * @param {string} id
+     */
+    _selectTreeItem(id) {
+        // No item (the selected item was clicked again): the file view
+        if (id === null) return this._showFile();
+        const item = this._tree.get(id);
+        // Sections only expand: the inspector keeps what it shows
+        if (item && item.data?.kind !== 'section') this._select(item);
+    }
+
+    /**
+     * @param {number} index
+     */
+    _selectClip(index) {
+        this._animations.select(index);
+        this._toolbar.setClip(this._animations.current?.name ?? null);
+        this._toolbar.setPlaying(this._animations.isPlaying);
+    }
+
+    /**
+     * Makes a clip current and plays it from its first frame.
+     * @param {number | import('./editor/AnimationController').AnimationClip} clip index in the clip list, or the clip (e.g. the whole timeline)
+     */
+    _playClip(clip) {
+        this._animations.select(clip);
+        this._animations.play();
+        this._toolbar.setClip(this._animations.current?.name ?? null);
+        this._toolbar.setPlaying(this._animations.isPlaying);
+    }
+
+    /**
+     * Records a property change; undo restores an exact snapshot when the property provides one.
+     * @param {import('./editor/PropertyPanel').PropertyDescriptor} property
+     * @param {any} value
+     */
+    _commitProperty(property, value) {
+        if (!property.set) return;
+        if (property.transient) {
+            property.set(value);
+            this._panel.refresh();
+            return;
+        }
+        if (!this._canEdit) return;
+        if (this._selection) this._markChanged(objectOf(this._selection.data), 'modified');
+        this._history.executeMutation(
+            `Change ${property.label}`,
+            property.capture ?? property.get,
+            () => property.set(value),
+            property.restore ?? property.set,
+        );
+    }
+
+    /**
+     * Records a table cell change.
+     * @param {import('./editor/DataTable').TableColumn} column
+     * @param {number} row
+     * @param {number | string} oldValue
+     * @param {number | string} newValue
+     */
+    _commitCell(column, row, oldValue, newValue) {
+        if (!this._canEdit || !column.set) return;
+        if (this._selection) this._markChanged(objectOf(this._selection.data), 'modified');
+        const label = `Change ${column.label}`;
+        if (column.capture && column.restore) {
+            this._history.executeMutation(label, () => column.capture(row), () => column.set(row, newValue), state => column.restore(row, state));
+        } else {
+            this._history.execute({ label, apply: () => column.set(row, newValue), revert: () => column.set(row, oldValue) });
+        }
+    }
+
+    /**
+     * Records a key drag of the graph view; the drag already changed the keys.
+     * @param {import('./editor/CurveTable').CurveData} data
+     * @param {number} row
+     * @param {string} label
+     * @param {any} before record snapshot before the drag
+     * @param {any} after record snapshot after the drag
+     */
+    _commitCurve(data, row, label, before, after) {
+        if (!this._canEdit) {
+            data.restore(row, before);
+            return;
+        }
+        if (this._selection) this._markChanged(objectOf(this._selection.data), 'modified');
+        this._history.execute({ label, apply: () => data.restore(row, after), revert: () => data.restore(row, before) });
+    }
+
+    /** Syncs the UI with the model after an edit, undo or redo. */
+    _refresh() {
+        vscode.postMessage({ type: 'treeChanged' });
+        this._panel.refresh();
+        this._toolbar.setClip(this._animations.current?.name ?? null);
+    }
+
+    /**
+     * Handles extension host messages and notifies the host that the webview can receive the model.
+     */
+    listenHostMessages() {
+        window.addEventListener('message', async (event) => {
+            const message = event.data;
+            if (this._host.handleMessage(message)) return;
+            switch (message?.type) {
+                case 'loadModel':
+                case 'reloadModel':
+                    this.loadModel(message.data, { keepView: !!message.keepView });
+                    break;
+                case 'applyPatches':
+                    this._applyDocumentPatches(message.patches);
+                    break;
+                case 'treeCommand':
+                    try {
+                        vscode.postMessage({ type: 'treeCommandResult', requestId: message.requestId, result: this._runTreeCommand(message) ?? null });
+                    } catch (error) {
+                        vscode.postMessage({ type: 'treeCommandResult', requestId: message.requestId, error: String(error?.message || error) });
+                    }
+                    break;
+                case 'documentSaved':
+                    // The tree decorations start over (formats other than .babylon)
+                    this._changed.clear();
+                    vscode.postMessage({ type: 'treeChanged' });
+                    break;
+                case 'documentError':
+                    // The text cannot be parsed: the last model stays, the message says how to recover
+                    setStatus(message.message, true);
+                    break;
+                case 'validate':
+                    vscode.postMessage({ type: 'validated', requestId: message.requestId, error: await this.validate(message.data) });
+                    break;
+                case 'convertModel':
+                    await this._convertModel(message);
+                    break;
+                case 'exportModel':
+                    await this._exportModel(message);
+                    break;
+                case 'undo':
+                    this._history.undo();
+                    break;
+                case 'redo':
+                    this._history.redo();
+                    break;
+                case 'treeRequest':
+                    vscode.postMessage({ type: 'treeItems', requestId: message.requestId, items: this._tree.getChildren(message.parentId) });
+                    break;
+                case 'treeSelect':
+                    this._selectTreeItem(message.id);
+                    break;
+                case 'getFileData':
+                    try {
+                        const data = await this.serialize();
+                        vscode.postMessage({ type: 'fileData', requestId: message.requestId, data });
+                    } catch (error) {
+                        console.error('[BabylonEditor] Failed to serialize model', error);
+                        vscode.postMessage({ type: 'fileData', requestId: message.requestId, error: String(error?.message || error) });
+                    }
+                    break;
+            }
+        });
+        vscode.postMessage({ type: 'ready' });
+    }
+}
+
+function createEditor() {
+    const root = document.querySelector('.editor');
+    if (!root) return;
+    new Editor(root).listenHostMessages();
+}
+
+function main() {
+    window.addEventListener('DOMContentLoaded', createEditor);
+}
+
+main();
