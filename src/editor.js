@@ -690,12 +690,18 @@ class Editor {
             convertedFrom: window.payload?.convertedFrom ?? null,
             isHiddenInView: mesh => this._hiddenInView.has(mesh),
             setHiddenInView: (mesh, hidden) => this._setHiddenInView(mesh, hidden),
+            showJointNodes: () => !!vscode.getState()?.showJointNodes,
+            setShowJointNodes: (show) => vscode.setState({ ...vscode.getState(), showJointNodes: show }),
             fileFields: this._fileFields ?? null,
             documentFields: this._binding?.documentFields ?? null,
             binding: this._binding,
             openObject: data => this._openObject(data),
             objectCommand: (op, data) => this._objectCommand(op, data),
             textureImage: this._textureImage,
+            promptNumber: async (title, prompt, value) => {
+                const input = await this._host.request('inputBox', { title, prompt, value: String(value), positiveNumber: true });
+                return input === null ? null : Number(input.trim().replace(',', '.'));
+            },
         };
     }
 

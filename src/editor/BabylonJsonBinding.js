@@ -201,6 +201,10 @@ export class BabylonJsonBinding {
             .flatMap(kind => json[kind] ?? []).map(object => Number(object?.uniqueId)).filter(Number.isFinite));
         /** @type {DocumentField[]} */
         this.documentFields = [];
+        /** @type {JsonPatch[]} patches of values that are not compared (queuePatch), sent by the next collect */
+        this._queued = [];
+        /** @type {any[]} shared geometries of the document (`geometryId` of a mesh refers to one) */
+        this._geometries = Array.isArray(json.geometries?.vertexData) ? json.geometries.vertexData : [];
         this._bindDocument(json);
         this._bindMeshes(json, container);
         this._bindMaterials(json, container);
@@ -228,6 +232,25 @@ export class BabylonJsonBinding {
      */
     isInDocument(path) {
         return this._present.has(pathKey(path));
+    }
+
+    /**
+     * Writes a value that is not compared (e.g. the position of a node an animation drives, whose
+     * current value is the playing pose) with the next collect. A value that is compared is left to
+     * the comparison.
+     * @param {object} object a bound model object
+     * @param {string} key
+     * @param {any} value in the `.babylon` format
+     * @returns {boolean} whether the object has a place in the document
+     */
+    queuePatch(object, key, value) {
+        const base = this._paths.get(object);
+        if (!base) return false;
+        const path = [...base, key];
+        if (this._values.has(pathKey(path))) return true;
+        this._queued.push({ path, value });
+        this._present.add(pathKey(path));
+        return true;
     }
 
     /**
@@ -259,7 +282,8 @@ export class BabylonJsonBinding {
      */
     collect() {
         /** @type {JsonPatch[]} */
-        const patches = [];
+        const patches = this._queued;
+        this._queued = [];
         for (const [key, value] of this._values) {
             if (value.bulky) {
                 if (this._dirty.has(key)) patches.push({ path: value.path, value: value.get() });
@@ -488,18 +512,26 @@ export class BabylonJsonBinding {
             this._bind(at('skeletonUniqueId'), () => (node.skeleton ? this._fileUniqueIds.get(node.skeleton) ?? null : null), () => false);
         }
         if (node instanceof BABYLON.Mesh) {
+            // Vertices are in the mesh object, or in a shared geometry of the document (`geometryId`,
+            // e.g. converted glTF models), bound once for the meshes sharing it
+            const geometryIndex = this._geometries.findIndex(geometry => geometry?.id === source.geometryId);
+            const vertexPath = (property) => {
+                if (Array.isArray(source[property])) return at(property);
+                if (geometryIndex >= 0 && Array.isArray(this._geometries[geometryIndex][property])) return ['geometries', 'vertexData', geometryIndex, property];
+                return null;
+            };
             for (const [property, kind] of Object.entries(VERTEX_KINDS)) {
-                // Vertices stored in a shared geometry (`geometryId`) are not bound
-                if (!Array.isArray(source[property])) continue;
+                const path = vertexPath(property);
+                if (!path || this._values.has(pathKey(path))) continue;
                 const stride = BABYLON.VertexBuffer.DeduceStride(kind);
-                this._bind(at(property), () => float32Array(node.getVerticesData(kind) ?? []), (value) => {
+                this._bind(path, () => float32Array(node.getVerticesData(kind) ?? []), (value) => {
                     node.setVerticesData(kind, value, true, stride);
                     if (kind === BABYLON.VertexBuffer.PositionKind) node.refreshBoundingInfo();
                 }, true);
             }
             this._track(node, 'setVerticesData', ([kind]) => {
                 const property = Object.keys(VERTEX_KINDS).find(key => VERTEX_KINDS[key] === kind);
-                return property && Array.isArray(source[property]) ? at(property) : null;
+                return property ? vertexPath(property) : null;
             });
         }
         this._bindAnimations(base, source, node);

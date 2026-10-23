@@ -370,6 +370,11 @@ h1 {
 		&:hover {
 			opacity: 1;
 		}
+
+		&-label {
+			flex: 1;
+			min-width: 0;
+		}
 	}
 
 	&__value {
@@ -513,6 +518,10 @@ h1 {
 	&__entry {
 		display: flex;
 		flex-direction: column;
+
+		&[hidden] {
+			display: none;
+		}
 
 		&-header {
 			display: flex;

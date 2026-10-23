@@ -3,6 +3,7 @@ import { BABYLON_FILE_SCHEMA, MATERIAL_TEXTURE_SLOTS, schemaProperties } from '.
 import { ClipFrameEditor } from './ClipFrameEditor';
 import { formatNumber } from './DataTable';
 import { textureLabel, triangleCount } from './ModelOutline';
+import { SkeletonScale } from './SkeletonScale';
 import { texturePreview } from './TextureImage';
 
 /**
@@ -26,6 +27,8 @@ import { texturePreview } from './TextureImage';
  * @property {import('./BabylonJsonBinding').BabylonJsonBinding | null} binding the document binding of a .babylon text (null for other formats)
  * @property {(mesh: BABYLON.AbstractMesh) => boolean} isHiddenInView whether a mesh is hidden in the 3D view only
  * @property {(mesh: BABYLON.AbstractMesh, hidden: boolean) => void} setHiddenInView hides a mesh in the 3D view
+ * @property {() => boolean} showJointNodes whether node lists show the joint nodes of skeletons
+ * @property {(show: boolean) => void} setShowJointNodes
  *   without changing the model (the file keeps it as it is)
  * @property {string | null} convertedFrom name of the model file a converted `.babylon` document is edited for
  * @property {(data: ModelItemData) => void} openObject shows an object listed in the inspector (a child node, a part, a
@@ -33,6 +36,8 @@ import { texturePreview } from './TextureImage';
  * @property {(op: 'rename' | 'delete', data: ModelItemData) => void} objectCommand runs a command of the tree context menu
  *   on a listed object (the host asks for the name / the confirmation)
  * @property {import('./TextureImage').TextureImage} textureImage commands of the image of a texture
+ * @property {(title: string, prompt: string, value: number) => Promise<number | null>} promptNumber asks the
+ *   user for a number greater than 0 (null when cancelled)
  */
 
 /** @typedef {import('./PropertyPanel').PropertyDescriptor} PropertyDescriptor */
@@ -59,6 +64,34 @@ function requiredBones(mesh) {
         }
     }
     return highest + 1;
+}
+
+/**
+ * @param {BABYLON.AssetContainer} container
+ * @returns {Set<BABYLON.TransformNode>} the nodes bones are linked to (the joints of glTF skins):
+ *   their transforms are the bones, shown by the skeleton
+ */
+function jointNodes(container) {
+    return new Set(container.skeletons.flatMap(skeleton => skeleton.bones.map(bone => bone.getTransformNode()).filter(Boolean)));
+}
+
+/**
+ * The button next to a reference (a select of an object) that opens the chosen object in its own
+ * inspector; disabled while nothing is chosen.
+ * @param {string} kind object kind for the tooltip
+ * @param {() => any} chosen the referenced object, or null
+ * @param {(object: any) => void} open
+ * @returns {import('./PropertyPanel').PanelAction}
+ */
+function openObjectAction(kind, chosen, open) {
+    return {
+        label: 'Open',
+        title: `Open the ${kind} in its own inspector`,
+        icon: 'go-to-file',
+        transient: true,
+        isDisabled: () => !chosen(),
+        run: () => open(chosen()),
+    };
 }
 
 // --- Generic property builders -------------------------------------------------------------
@@ -455,6 +488,8 @@ export class ModelProperties {
         const { container } = context;
         const own = new Set([...container.meshes, ...container.transformNodes]);
         const descendants = node.getDescendants(false, child => own.has(child));
+        const joints = jointNodes(container);
+        const jointCount = descendants.filter(child => joints.has(child)).length;
         const entry = (child, description) => ({
             label: () => child.name || '(unnamed)',
             description,
@@ -469,7 +504,20 @@ export class ModelProperties {
                 title: 'Nodes',
                 items: descendants
                     .filter(child => !(child instanceof BABYLON.AbstractMesh))
-                    .map(child => entry(child, () => (child.parent && child.parent !== node ? `in ${child.parent.name}` : ''))),
+                    .map(child => ({
+                        ...entry(child, () => (child.parent && child.parent !== node ? `in ${child.parent.name}` : '')),
+                        // Joint nodes repeat the bones of the skeleton: hidden unless asked for
+                        ...(joints.has(child) ? { isHidden: () => !context.showJointNodes() } : {}),
+                    })),
+                ...(jointCount ? {
+                    toggle: {
+                        label: 'Bone nodes',
+                        title: () => (context.showJointNodes() ? `Hide the ${jointCount} nodes of the skeleton bones` : `Show the ${jointCount} nodes of the skeleton bones`),
+                        icon: () => (context.showJointNodes() ? 'eye' : 'eye-closed'),
+                        transient: true,
+                        run: () => context.setShowJointNodes(!context.showJointNodes()),
+                    },
+                } : {}),
             },
             {
                 title: 'Parts',
@@ -512,7 +560,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PropertyDescriptor[]}
      */
-    static _textureSlotProperties(material, { container }) {
+    static _textureSlotProperties(material, { container, openObject }) {
         const slots = new Set(MATERIAL_TEXTURE_SLOTS[material.getClassName()] ?? []);
         // Slots of other material classes that hold a texture are shown too
         for (const key of Object.keys(material.serialize())) {
@@ -531,6 +579,7 @@ export class ModelProperties {
                 options,
                 get: () => String(material[slot]?.uniqueId ?? ''),
                 set: (value) => { material[slot] = container.textures.find(texture => String(texture.uniqueId) === value) ?? null; },
+                action: openObjectAction('texture', () => material[slot], texture => openObject({ kind: 'texture', texture })),
             })),
         ];
     }
@@ -542,7 +591,7 @@ export class ModelProperties {
      * @returns {PropertyDescriptor[]}
      */
     static _nodeProperties(node, context) {
-        const { container } = context;
+        const { container, openObject } = context;
         const isMesh = node instanceof BABYLON.AbstractMesh;
         /** @type {PropertyDescriptor[]} */
         const properties = [
@@ -570,6 +619,7 @@ export class ModelProperties {
                     ],
                     get: () => String(node.material?.uniqueId ?? ''),
                     set: (value) => { node.material = container.materials.find(material => String(material.uniqueId) === value) ?? null; },
+                    action: openObjectAction('material', () => node.material, material => openObject({ kind: 'material', material })),
                 },
                 readonlyProperty('Vertices', () => node.getTotalVertices()),
                 readonlyProperty('Triangles', () => triangleCount(node)),
@@ -604,14 +654,7 @@ export class ModelProperties {
             ],
             get: () => String(mesh.skeleton?.uniqueId ?? ''),
             set: (value) => { mesh.skeleton = container.skeletons.find(skeleton => String(skeleton.uniqueId) === value) ?? null; },
-            action: {
-                label: 'Open',
-                title: 'Open the skeleton in its own inspector',
-                icon: 'go-to-file',
-                transient: true,
-                isDisabled: () => !mesh.skeleton,
-                run: () => openObject({ kind: 'skeleton', skeleton: mesh.skeleton }),
-            },
+            action: openObjectAction('skeleton', () => mesh.skeleton, skeleton => openObject({ kind: 'skeleton', skeleton })),
         }];
         if (mesh.skeleton || needed) properties.push(readonlyProperty('Bone influencers', () => mesh.numBoneInfluencers));
         return properties;
@@ -923,7 +966,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _skeleton(skeleton, { animations, highlighter, showPose, isPose }) {
+    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber }) {
         const bones = skeleton.bones;
         const groups = ['position', 'rotation', 'scaling'];
         /** @type {'rest' | 'bind'} set by the Rest | Bind switch of the panel */
@@ -982,6 +1025,21 @@ export class ModelProperties {
                 readonlyProperty('Bones', () => bones.length),
                 readonlyProperty('Animation ranges', () => skeleton.getAnimationRanges().filter(Boolean).length),
             ],
+            actions: [{
+                label: 'Scale…',
+                title: 'Scale the skeleton and the meshes it deforms uniformly, baked into the bones, the animations and the vertices',
+                icon: 'screen-full',
+                run: async () => {
+                    const factor = await promptNumber(`Scale ${skeleton.name || 'the skeleton'}`, 'Factor for the skeleton and its meshes, e.g. 0.01 for centimeters to meters', 1);
+                    if (!factor || factor === 1) return;
+                    history.executeMutation(
+                        `Scale ${skeleton.name || 'skeleton'} ×${factor}`,
+                        () => SkeletonScale.capture(skeleton, container, animations),
+                        () => SkeletonScale.apply(skeleton, container, animations, factor, binding),
+                        state => SkeletonScale.restore(skeleton, animations, state),
+                    );
+                },
+            }],
             table: {
                 title: 'Bones',
                 columns,

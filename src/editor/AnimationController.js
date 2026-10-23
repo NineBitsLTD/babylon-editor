@@ -355,6 +355,16 @@ export class AnimationController {
     }
 
     /**
+     * Sets the bind poses of all bones at once, each given in the space of poseMatrix(bone, 'bind')
+     * (relative to the parent bone, or to the parent node for a glTF root bone).
+     * @param {BABYLON.Skeleton} skeleton
+     * @param {BABYLON.Matrix[]} poses one per bone, in the order of `skeleton.bones`
+     */
+    setBindPoses(skeleton, poses) {
+        this.restoreBind(skeleton, skeleton.bones.map((bone, index) => this._storedBind(bone, poses[index])));
+    }
+
+    /**
      * Inverse of the glTF root conversion of _bindPose: a matrix relative to the parent node
      * back to the stored bind matrix (in the glTF scene space).
      * @param {BABYLON.Bone} bone

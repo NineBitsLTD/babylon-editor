@@ -57,6 +57,8 @@ const COLLAPSED_BY_DEFAULT = new Set(['Other file fields']);
  * @property {string} [icon] codicon name without the prefix
  * @property {PanelAction} [toggle] a small button at the end of the header line (e.g. hide a part
  *   in the 3D view); it does not open the entry
+ * @property {() => boolean} [isHidden] the entry is left out of the list (re-read on refresh, e.g.
+ *   after the toggle of its list)
  * @property {() => PropertyDescriptor[]} properties created when the entry is opened
  * @property {PanelAction[]} [actions] buttons under the properties of the opened entry
  * @property {() => void} [onOpen]
@@ -69,6 +71,8 @@ const COLLAPSED_BY_DEFAULT = new Set(['Other file fields']);
  * @typedef {object} PanelList
  * @property {string} title
  * @property {PanelListItem[]} items
+ * @property {PanelAction} [toggle] a small button at the end of the group heading (e.g. show the
+ *   entries it hides); the panel is refreshed after it runs
  */
 
 /**
@@ -224,7 +228,7 @@ export class PropertyPanel {
         const headings = groups.length + lists.length + (content.table ? 1 : 0) > 1;
         const pushLists = () => lists.forEach((list) => {
             const element = this._renderList(list);
-            if (headings) children.push(this._renderGroupHeading(list.title, element, 'inspector__list--collapsed'));
+            if (headings) children.push(this._renderGroupHeading(list.title, element, 'inspector__list--collapsed', list.toggle));
             children.push(element);
         });
         groups.forEach((group, index) => {
@@ -270,13 +274,22 @@ export class PropertyPanel {
      * @param {string} label
      * @param {HTMLElement} target the group content
      * @param {string} collapsedClass modifier hiding the content
+     * @param {PanelAction} [toggle] a button at the end of the heading
      * @returns {HTMLElement}
      */
-    _renderGroupHeading(label, target, collapsedClass) {
+    _renderGroupHeading(label, target, collapsedClass, toggle) {
         const heading = document.createElement('button');
         heading.className = 'inspector__section';
         const icon = document.createElement('i');
-        heading.append(icon, document.createTextNode(label));
+        const text = document.createElement('span');
+        text.className = 'inspector__section-label';
+        text.textContent = label;
+        heading.append(icon, text);
+        if (toggle) {
+            const button = this._renderEntryToggle(toggle, () => this.refresh());
+            this._updaters.push(() => this._updateEntryToggle(button, toggle));
+            heading.append(button);
+        }
         const apply = () => {
             const collapsed = this._collapsedGroups.get(label) ?? COLLAPSED_BY_DEFAULT.has(label);
             icon.className = `codicon codicon-chevron-${collapsed ? 'right' : 'down'}`;
@@ -329,6 +342,9 @@ export class PropertyPanel {
         const toggle = item.toggle ? this._renderEntryToggle(item.toggle) : null;
         if (toggle) header.append(toggle);
         const update = () => {
+            const hidden = !!item.isHidden?.();
+            element.hidden = hidden;
+            if (hidden && this._openEntry?.element === element) this._closeEntry();
             label.textContent = item.label();
             description.textContent = item.description?.() ?? '';
             header.title = label.textContent;
@@ -346,7 +362,7 @@ export class PropertyPanel {
         });
         element.append(header);
         const key = this._openKey;
-        if (key && !this._openEntry && key.list === listTitle && key.label === item.label() && key.subtitle === this._subtitleText()) {
+        if (key && !this._openEntry && !element.hidden && key.list === listTitle && key.label === item.label() && key.subtitle === this._subtitleText()) {
             this._openEntry = this._openListItem(element, item);
         }
         return element;
@@ -354,10 +370,11 @@ export class PropertyPanel {
 
     /**
      * @param {PanelAction} action
-     * @returns {HTMLElement} a button inside the header of an entry (the header is a button too,
-     *   so this is a span with the button role)
+     * @param {() => void} [onRun] called after the action ran (e.g. to refresh what it changes)
+     * @returns {HTMLElement} a button inside the header of an entry or a group (the header is a
+     *   button too, so this is a span with the button role)
      */
-    _renderEntryToggle(action) {
+    _renderEntryToggle(action, onRun) {
         const toggle = document.createElement('span');
         toggle.className = 'inspector__entry-toggle';
         toggle.setAttribute('role', 'button');
@@ -365,6 +382,7 @@ export class PropertyPanel {
             event.stopPropagation();
             action.run();
             this._updateEntryToggle(toggle, action);
+            onRun?.();
         });
         this._updateEntryToggle(toggle, action);
         return toggle;

@@ -159,6 +159,31 @@ export class ClipConverter {
     }
 
     /**
+     * The rotations of a clip, its kind kept: matrix keys take the position and the scaling of the
+     * rest pose of their bone (as they are when it has none), position and scaling tracks of nodes
+     * are left out.
+     * @param {CopiedClip} clip
+     * @param {(name: string) => Transform | null} restOf rest transform of a target by name
+     * @returns {CopiedClip}
+     */
+    static rotationsOnly(clip, restOf) {
+        const tracks = [];
+        for (const track of clip.tracks) {
+            const property = track.animation.property;
+            if (property === 'position' || property === 'scaling') continue;
+            const rest = property === '_matrix' ? restOf(track.target?.name) : null;
+            if (!rest) {
+                tracks.push(track);
+                continue;
+            }
+            const animation = BABYLON.Animation.Parse(track.animation);
+            animation.setKeys(animation.getKeys().map(key => ({ ...key, value: BABYLON.Matrix.Compose(rest.scaling, decomposeTransform(key.value).rotation, rest.position) })));
+            tracks.push({ ...track, animation: withKeys(track.animation, animation.serialize().keys) });
+        }
+        return { ...clip, tracks };
+    }
+
+    /**
      * The tracks of a clip mirrored along Z, the kind of the clip kept (a clip pasted between a
      * mirrored and a not mirrored model of the same kind).
      * @param {CopiedClip} clip

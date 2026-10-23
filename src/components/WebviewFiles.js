@@ -12,6 +12,8 @@ import * as vscode from 'vscode';
  * - `openFile` `{ filters? }` asks for a file; result: `{ data: ArrayBuffer, fileName }`, or null
  * - `readClipboard` result: the text of the clipboard
  * - `writeClipboard` `{ text }` puts text into the clipboard
+ * - `inputBox` `{ title, prompt?, value?, positiveNumber? }` asks for a text (a number > 0 with
+ *   `positiveNumber`); result: the text, or null when cancelled
  * - `showMessage` `{ level: 'info' | 'warning' | 'error', text }` (no reply)
  */
 export class WebviewFiles {
@@ -55,6 +57,16 @@ export class WebviewFiles {
         },
         async writeClipboard({ text }) {
             await vscode.env.clipboard.writeText(text);
+        },
+        async inputBox({ title, prompt, value, positiveNumber }) {
+            const validateInput = positiveNumber
+                ? (input) => {
+                    const number = Number(input.trim().replace(',', '.'));
+                    return Number.isFinite(number) && number > 0 ? null : 'Enter a number greater than 0';
+                }
+                : undefined;
+            const input = await vscode.window.showInputBox({ title, prompt, value, validateInput });
+            return input === undefined ? null : input;
         },
         async showMessage({ level, text }) {
             const show = level === 'error' ? vscode.window.showErrorMessage : level === 'warning' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
