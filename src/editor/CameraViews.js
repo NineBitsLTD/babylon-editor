@@ -18,14 +18,16 @@ import { VERTICES_LAYER } from './ViewRendering';
  */
 
 /**
- * What a view shows, set from the view bar while it is selected: the render mode, the vertices
- * (points over any mode) and, in skeleton mode, the meshes and the bones.
+ * What a camera shows in a view, set from the view bar while its view is selected: the render
+ * mode, the vertices (points over any mode) and, in skeleton mode, the meshes and the bones. The
+ * settings belong to the camera: they move with it to another view.
  * @typedef {{ renderMode: import('./Toolbar').RenderMode, vertices?: boolean, display: import('./SelectionHighlighter').SkeletonDisplay }} ViewSettings
  */
 
 /**
- * State kept in the webview state: the cameras of the views, their settings and the virtual cameras.
- * @typedef {{ slots: string[], views?: ViewSettings[], selected?: number, virtual: { id: string, json: any, home: any }[] }} CameraViewsState
+ * State kept in the webview state: the cameras of the views, the settings of the cameras (by ref)
+ * and the virtual cameras.
+ * @typedef {{ slots: string[], settings?: Record<string, ViewSettings>, selected?: number, virtual: { id: string, json: any, home: any }[] }} CameraViewsState
  */
 
 /** Views of each count in canvas fractions, Babylon viewports (origin at the bottom left). */
@@ -39,6 +41,72 @@ const VIEWPORTS = {
 /** Delay before the moved cameras are kept in the webview state. */
 const SAVE_DELAY = 500;
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+/** The world axes of the axes icon of a view, with their colors. */
+const AXES = [
+    { label: 'X', direction: new BABYLON.Vector3(1, 0, 0), color: '#e5484d' },
+    { label: 'Y', direction: new BABYLON.Vector3(0, 1, 0), color: '#46a758' },
+    { label: 'Z', direction: new BABYLON.Vector3(0, 0, 1), color: '#3e8ef7' },
+];
+/** Length of an axis of the icon (its svg is 48 units wide, the center in the middle). */
+const AXIS_LENGTH = 15;
+
+/**
+ * An icon of the world axes as a camera sees them: a line and a labelled circle per axis, a dot
+ * for its negative side.
+ * @returns {{ element: SVGSVGElement, update: (camera: BABYLON.Camera) => void }}
+ */
+function createAxesIcon() {
+    const element = /** @type {SVGSVGElement} */ (document.createElementNS(SVG_NS, 'svg'));
+    element.setAttribute('class', 'views__axes');
+    element.setAttribute('viewBox', '-24 -24 48 48');
+    const make = (tag, attributes) => {
+        const node = document.createElementNS(SVG_NS, tag);
+        Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+        return node;
+    };
+    const parts = AXES.map(({ label, color }) => {
+        const group = make('g', {});
+        const negative = make('circle', { r: 2.5, fill: color, 'fill-opacity': 0.45 });
+        const line = make('line', { x1: 0, y1: 0, stroke: color, 'stroke-width': 2, 'stroke-linecap': 'round' });
+        const tip = make('circle', { r: 5.5, fill: color });
+        const text = make('text', { 'text-anchor': 'middle', 'dominant-baseline': 'central', 'font-size': 7, 'font-weight': 'bold', fill: '#fff' });
+        text.textContent = label;
+        group.append(negative, line, tip, text);
+        element.append(group);
+        return { group, negative, line, tip, text };
+    });
+    const view = new BABYLON.Vector3();
+    return {
+        element,
+        update(camera) {
+            const matrix = camera.getViewMatrix();
+            const projected = AXES.map(({ direction }, index) => {
+                // View space: x to the right, y up, z away from the camera
+                BABYLON.Vector3.TransformNormalToRef(direction, matrix, view);
+                const length = view.length() || 1;
+                return { index, x: view.x / length, y: view.y / length, z: view.z / length };
+            });
+            // Farther axes first, so the nearer ones are drawn over them
+            projected.sort((a, b) => b.z - a.z);
+            for (const { index, x, y } of projected) {
+                const { group, negative, line, tip, text } = parts[index];
+                const tipX = x * AXIS_LENGTH;
+                const tipY = -y * AXIS_LENGTH;
+                line.setAttribute('x2', tipX.toFixed(2));
+                line.setAttribute('y2', tipY.toFixed(2));
+                for (const node of [tip, text]) {
+                    node.setAttribute(node === text ? 'x' : 'cx', tipX.toFixed(2));
+                    node.setAttribute(node === text ? 'y' : 'cy', tipY.toFixed(2));
+                }
+                negative.setAttribute('cx', (-tipX).toFixed(2));
+                negative.setAttribute('cy', (-tipY).toFixed(2));
+                element.append(group);
+            }
+        },
+    };
+}
+
 /**
  * @param {any} json the camera in the `.babylon` format
  * @param {BABYLON.Scene} scene
@@ -51,7 +119,8 @@ function parseCamera(json, scene) {
 /**
  * The views of the model on the canvas: one to four cameras, each in its part of the canvas
  * (`scene.activeCameras` with viewports). The view under the mouse gets the mouse controls (and the
- * picking); a tag in each view names its camera and opens the menu to change it. Cameras of the file
+ * picking); a tag in each view names its camera and opens the menu to change it, an icon of the
+ * world axes (top left) turns with the camera. Cameras of the file
  * are shown through copies kept in sync with them (an edit of the file camera, a reload), so moving
  * a view never changes the model. Virtual cameras live only in memory (and in the webview state).
  */
@@ -65,7 +134,7 @@ export class CameraViews {
      *   the base cameras (top, side, front views): not in the file
      * @param {(index: number, tag: HTMLElement) => void} options.onTagClick the camera tag of a view was clicked
      * @param {() => void} options.onChange the cameras or their places changed (kept in the webview state)
-     * @param {() => ViewSettings} options.defaults the settings of a view not set yet
+     * @param {(ref: string | null) => ViewSettings} options.defaults the settings of a camera not set yet
      * @param {() => boolean} options.isSkeletonMode the bones are shown (the views hide meshes / bones as set)
      * @param {(index: number) => void} options.onSelect another view was selected (the view bar shows its settings)
      * @param {(settings: ViewSettings) => void} options.onBeforeView a view is about to be rendered
@@ -84,8 +153,8 @@ export class CameraViews {
         this._isSkeletonMode = isSkeletonMode;
         this._onSelect = onSelect;
         this._onVerticesNeeded = onVerticesNeeded;
-        /** @type {ViewSettings[]} settings of each view */
-        this._settings = Array.isArray(state?.views) ? state.views.map(settings => ({ ...settings, display: { ...settings.display } })) : [];
+        /** @type {Record<string, ViewSettings>} settings of each camera, by ref */
+        this._settings = state?.settings && typeof state.settings === 'object' ? { ...state.settings } : {};
         /** The view the view bar shows and acts on (selected by a click) */
         this._selected = Number.isInteger(state?.selected) ? state.selected : 0;
         /** @type {BABYLON.AssetContainer | null} */
@@ -124,6 +193,15 @@ export class CameraViews {
         scene.onAfterCameraRenderObservable.add((camera) => {
             if (this._shown.includes(camera)) onAfterView();
         });
+        /** @type {(ReturnType<typeof createAxesIcon> | null)[]} the axes icons of the shown views */
+        this._axes = [];
+        // The axes icons turn with their cameras
+        scene.onAfterRenderObservable.add(() => {
+            this._axes.forEach((icon, index) => {
+                const camera = this._shown[index];
+                if (icon && camera) icon.update(camera);
+            });
+        });
     }
 
     /** @returns {number} the view the view bar shows and acts on */
@@ -133,21 +211,24 @@ export class CameraViews {
 
     /**
      * @param {number} index
-     * @returns {ViewSettings} the settings of a view
+     * @returns {ViewSettings} the settings of the camera of a view
      */
     settingsOf(index) {
-        this._settings[index] ??= this._defaults();
-        return this._settings[index];
+        const ref = this._resolved[index]?.ref ?? null;
+        const key = ref ?? `empty:${index}`;
+        this._settings[key] ??= this._defaults(ref);
+        return this._settings[key];
     }
 
     /**
-     * Changes the settings of a view (from the view bar).
+     * Changes the settings of the camera of a view (from the view bar).
      * @param {number} index
      * @param {Partial<ViewSettings>} changes
      */
     setSettings(index, changes) {
         const settings = this.settingsOf(index);
-        this._settings[index] = { ...settings, ...changes, display: { ...settings.display, ...changes.display } };
+        const key = this._resolved[index]?.ref ?? `empty:${index}`;
+        this._settings[key] = { ...settings, ...changes, display: { ...settings.display, ...changes.display } };
         this.applyMasks();
         this._onChange();
     }
@@ -193,7 +274,7 @@ export class CameraViews {
     get state() {
         return {
             slots: [...this._slots],
-            views: this._settings,
+            settings: this._settings,
             selected: this._selected,
             virtual: [...this._virtual].map(([id, { camera, home }]) => ({ id, json: camera.serialize(), home })),
         };
@@ -259,6 +340,8 @@ export class CameraViews {
         if (other >= 0 && other !== index) this._slots[other] = current[index] ?? this._slots[index];
         this._slots[index] = ref;
         this.apply();
+        // The view bar shows the settings of the camera now in the selected view
+        this._onSelect(this._selected);
         this._onChange();
     }
 
@@ -437,6 +520,7 @@ export class CameraViews {
     /** One frame per view with the tag of its camera (top right). */
     _renderTags() {
         const viewports = VIEWPORTS[this._count];
+        this._axes = [];
         this._overlay.replaceChildren(...this._resolved.map((entry, index) => {
             const [x, y, width, height] = viewports[index];
             const view = document.createElement('div');
@@ -463,6 +547,10 @@ export class CameraViews {
                 this._onTagClick(index, tag);
             });
             view.append(tag);
+            // The world axes as the camera sees them (top left)
+            const axes = entry ? createAxesIcon() : null;
+            if (axes) view.append(axes.element);
+            this._axes.push(axes);
             return view;
         }));
     }

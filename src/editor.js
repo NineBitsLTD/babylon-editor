@@ -191,7 +191,10 @@ class Editor {
             previews: () => this._camera.views,
             onTagClick: (index, tag) => this._showViewCameraMenu(index, tag),
             onChange: () => this._saveCameraViews(),
-            defaults: () => ({ renderMode: viewSettings().renderMode ?? 'textured', display: { ...this._highlighter.skeletonDisplay } }),
+            // The top, side and front views show lines with the vertices; the others the last chosen mode
+            defaults: ref => (ref?.startsWith('base:')
+                ? { renderMode: 'wireframe', vertices: true, display: { ...this._highlighter.skeletonDisplay } }
+                : { renderMode: viewSettings().renderMode ?? 'textured', vertices: false, display: { ...this._highlighter.skeletonDisplay } }),
             isSkeletonMode: () => this._highlighter.isSkeletonMode,
             onSelect: () => this._syncViewBar(),
             onBeforeView: settings => this._viewRendering.beforeView(settings),
@@ -648,6 +651,7 @@ class Editor {
             // The views show the cameras of the new model (through new copies) and the new preview camera
             this._viewRendering.setContainer(container);
             this._cameraViews.setContainer(container);
+            this._syncViewBar();
             this._resetTree();
             this._inspectorObjects.clear();
             this._hiddenInView.clear();

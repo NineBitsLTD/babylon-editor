@@ -167,6 +167,19 @@ h1 {
 		&--selected {
 			border-color: var(--vscode-focusBorder);
 		}
+
+		&--top .views__axes {
+			top: 48px;
+		}
+	}
+
+	&__axes {
+		position: absolute;
+		top: 8px;
+		left: 8px;
+		width: 48px;
+		height: 48px;
+		font-family: var(--vscode-font-family, sans-serif);
 	}
 
 	&__tag {
