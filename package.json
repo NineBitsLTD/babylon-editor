@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -266,7 +266,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "package": "vsce package --no-dependencies",
+    "pack": "vsce package --no-dependencies",
     "clean": "rm -rf dist",
     "clean:css-temp": "rm -f src/scss/*.css*",
     "copy:assets": "cp -R public/* dist/ 2>/dev/null || true",

@@ -90,6 +90,14 @@ export function triangleCount(mesh) {
 }
 
 /**
+ * @param {import('./AnimationController').AnimationClip | null | undefined} clip
+ * @returns {string} the codicon of a clip: the whole timeline or a clip
+ */
+export function clipIcon(clip) {
+    return clip?.isTimeline ? 'list-flat' : 'play-circle';
+}
+
+/**
  * @param {BABYLON.Skeleton[]} skeletons
  * @returns {Set<BABYLON.TransformNode>} the nodes bones are linked to (the joints of glTF skins):
  *   their transforms are the bones, shown by the skeleton
@@ -257,7 +265,7 @@ export class ModelOutline {
         return {
             id: this._id('clip'),
             label: () => clip.name || '(unnamed)',
-            icon: clip.isTimeline ? 'list-flat' : 'play-circle',
+            icon: clipIcon(clip),
             description: () => `${formatNumber(clip.from, 1)}–${formatNumber(clip.to, 1)}`,
             data: { kind: 'clip', clip },
         };

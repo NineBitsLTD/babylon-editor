@@ -37,9 +37,13 @@ export class Toolbar {
         this._playButton = root.querySelector('.player__play');
         /** @type {HTMLInputElement} */
         this._slider = root.querySelector('.player__slider');
-        this._clipName = root.querySelector('.player__clip');
-        this._skeletonName = root.querySelector('.player__skeleton-name');
+        this._clipTag = root.querySelector('.player__clip');
+        this._clipIcon = this._clipTag.querySelector('.codicon');
+        this._clipName = this._clipTag.querySelector('.player__tag-name');
+        this._meshTag = root.querySelector('.player__mesh-name');
+        this._meshName = this._meshTag.querySelector('.player__tag-name');
         this._skeletonTag = root.querySelector('.player__skeleton');
+        this._skeletonName = this._skeletonTag.querySelector('.player__tag-name');
         this._skeletonGroup = root.querySelector('.player__group--skeleton');
         this._meshButton = root.querySelector('.player__mesh');
         this._bonesButton = root.querySelector('.player__bones');
@@ -99,20 +103,33 @@ export class Toolbar {
     }
 
     /**
-     * Shows the name of the current clip (clips are picked in the model tree) and of the skeleton
-     * it animates; the animation controls are hidden when the model has no animations.
+     * Shows the name of the current clip (clips are picked in the model tree), of the mesh and of
+     * the skeleton it animates; the animation controls are hidden when the model has no animations.
      * @param {string | null} name null when there is no clip
-     * @param {string | null} [skeleton] null when the clip animates no skeleton (nodes only)
+     * @param {{ icon?: string, skeleton?: string | null, mesh?: string | null, meshTitle?: string }} [rig]
+     *   icon - codicon of the clip, as in the model tree; skeleton - null when the clip animates no
+     *   skeleton (nodes only); mesh - null when the skeleton deforms no mesh; meshTitle - its tooltip
      */
-    setClip(name, skeleton = null) {
+    setClip(name, { icon = 'play-circle', skeleton = null, mesh = null, meshTitle = '' } = {}) {
         this._clipName.textContent = name ?? '';
-        this._clipName.title = name ? `Current animation: ${name}` : '';
-        this._clipName.classList.toggle('player__tag--hidden', name === null);
-        const showSkeleton = name !== null && skeleton !== null;
-        this._skeletonName.textContent = showSkeleton ? skeleton : '';
-        this._skeletonTag.title = showSkeleton ? `Skeleton of the current animation: ${skeleton}` : '';
-        this._skeletonTag.classList.toggle('player__tag--hidden', !showSkeleton);
+        this._clipIcon.className = `codicon codicon-${icon}`;
+        this._clipTag.title = name ? `Current animation: ${name}` : '';
+        this._clipTag.classList.toggle('player__tag--hidden', name === null);
+        Toolbar._setTag(this._meshTag, this._meshName, name !== null ? mesh : null, meshTitle);
+        Toolbar._setTag(this._skeletonTag, this._skeletonName, name !== null ? skeleton : null, `Skeleton of the current animation: ${skeleton}`);
         this._animationGroup.classList.toggle('player__animation--hidden', name === null);
+    }
+
+    /**
+     * @param {HTMLElement} tag
+     * @param {HTMLElement} label
+     * @param {string | null} text null hides the tag
+     * @param {string} title
+     */
+    static _setTag(tag, label, text, title) {
+        label.textContent = text ?? '';
+        tag.title = text === null ? '' : title;
+        tag.classList.toggle('player__tag--hidden', text === null);
     }
 
     /**
@@ -135,15 +152,22 @@ export class Toolbar {
     }
 
     /**
-     * Shows the mesh / bones toggles while a skeleton is shown and reflects their state.
-     * @param {boolean} active whether the skeleton mode is on
-     * @param {import('./SelectionHighlighter').SkeletonDisplay} display
+     * Shows the mesh / bones toggles while a skeleton is shown or the current clip animates one,
+     * and reflects what the view shows: outside the skeleton mode the mesh is shown, the bones not.
+     * @param {{ available: boolean, active: boolean, display: import('./SelectionHighlighter').SkeletonDisplay }} state
+     *   available - the current clip animates a skeleton; active - the skeleton mode is on
+     * @returns {boolean} whether the toggles were shown or hidden (the player changed its width)
      */
-    setSkeletonMode(active, display) {
-        this._skeletonGroup.classList.toggle('player__group--hidden', !active);
-        this._meshButton.classList.toggle('player__button--active', display.mesh);
-        this._meshButton.title = display.mesh ? 'Hide mesh' : 'Show mesh';
-        this._bonesButton.classList.toggle('player__button--active', display.bones);
-        this._bonesButton.title = display.bones ? 'Hide bones' : 'Show bones';
+    setSkeletonMode({ available, active, display }) {
+        const visible = available || active;
+        const changed = this._skeletonGroup.classList.contains('player__group--hidden') === visible;
+        this._skeletonGroup.classList.toggle('player__group--hidden', !visible);
+        const mesh = active ? display.mesh : true;
+        const bones = active && display.bones;
+        this._meshButton.classList.toggle('player__button--active', mesh);
+        this._meshButton.title = mesh ? (active ? 'Hide mesh' : 'Hide mesh, show the bones') : 'Show mesh';
+        this._bonesButton.classList.toggle('player__button--active', bones);
+        this._bonesButton.title = bones ? 'Hide bones' : 'Show bones';
+        return changed;
     }
 }

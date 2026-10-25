@@ -509,7 +509,7 @@ export class BabylonEditor {
                             <canvas className="canvas"></canvas>
                             <div className="status status--hidden"></div>
                             <div className="player">
-                                <div className="player__controls">
+                                <div className="player__controls player__controls--view">
                                     <div className="player__group">
                                         <button className="player__button player__mode" data-mode="textured" title="Show with textures">
                                             <i className="codicon codicon-file-media"></i>
@@ -532,22 +532,33 @@ export class BabylonEditor {
                                     <button className="player__button player__reset" title="Reset the view (camera back to the start position)">
                                         <i className="codicon codicon-home"></i>
                                     </button>
-                                    <button className="player__button player__orbit" title="Start auto-orbit">
-                                        <i className="codicon codicon-sync"></i>
-                                    </button>
-                                    <div className="player__animation player__animation--hidden">
-                                        <button className="player__button player__play" title="Play animation">
-                                            <i className="codicon codicon-play"></i>
-                                        </button>
-                                        <input className="player__slider" type="range" min="0" max="1000" value="0" title="Position"/>
-                                    </div>
                                 </div>
-                                <div className="player__tags">
-                                    <span className="player__tag player__clip player__tag--hidden"></span>
-                                    <span className="player__tag player__skeleton player__tag--hidden">
-                                        <i className="codicon codicon-person"></i>
-                                        <span className="player__skeleton-name"></span>
-                                    </span>
+                                <div className="player__bottom">
+                                    <div className="player__tags">
+                                        <span className="player__tag player__clip player__tag--hidden">
+                                            <i className="codicon codicon-play-circle"></i>
+                                            <span className="player__tag-name"></span>
+                                        </span>
+                                        <span className="player__tag player__mesh-name player__tag--hidden">
+                                            <i className="codicon codicon-symbol-structure"></i>
+                                            <span className="player__tag-name"></span>
+                                        </span>
+                                        <span className="player__tag player__skeleton player__tag--hidden">
+                                            <i className="codicon codicon-person"></i>
+                                            <span className="player__tag-name"></span>
+                                        </span>
+                                    </div>
+                                    <div className="player__controls player__controls--playback">
+                                        <button className="player__button player__orbit" title="Start auto-orbit">
+                                            <i className="codicon codicon-sync"></i>
+                                        </button>
+                                        <div className="player__animation player__animation--hidden">
+                                            <button className="player__button player__play" title="Play animation">
+                                                <i className="codicon codicon-play"></i>
+                                            </button>
+                                            <input className="player__slider" type="range" min="0" max="1000" value="0" title="Position"/>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>

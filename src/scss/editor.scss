@@ -131,13 +131,19 @@ h1 {
 
 .player {
 	position: absolute;
-	top: 8px;
-	right: 8px;
-	left: 8px;
+	inset: 8px;
 	display: flex;
 	flex-direction: column;
+	justify-content: space-between;
 	gap: 4px;
 	pointer-events: none;
+
+	&__bottom {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 0;
+	}
 
 	&__controls {
 		display: flex;
@@ -217,7 +223,10 @@ h1 {
 	}
 
 	&__tag {
+		display: flex;
 		flex: 0 1 auto;
+		align-items: center;
+		gap: 4px;
 		min-width: 0;
 		padding: 1px 8px;
 		overflow: hidden;
@@ -229,16 +238,6 @@ h1 {
 		color: var(--vscode-badge-foreground);
 		background-color: var(--vscode-badge-background);
 
-		&--hidden {
-			display: none;
-		}
-	}
-
-	&__skeleton {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-
 		.codicon {
 			flex-shrink: 0;
 			font-size: 11px;
@@ -249,7 +248,7 @@ h1 {
 			text-overflow: ellipsis;
 		}
 
-		&.player__tag--hidden {
+		&--hidden {
 			display: none;
 		}
 	}
@@ -1254,7 +1253,7 @@ h1 {
 
 .status {
 	position: absolute;
-	top: 64px;
+	top: 48px;
 	left: 8px;
 	padding: 4px 8px;
 	border-radius: 4px;

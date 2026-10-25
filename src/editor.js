@@ -10,7 +10,7 @@ import { FileInfo } from './editor/FileInfo';
 import { HostRequests } from './editor/HostRequests';
 import { ModelConverter } from './editor/ModelConverter';
 import { ModelEdits, objectOf } from './editor/ModelEdits';
-import { ModelOutline } from './editor/ModelOutline';
+import { clipIcon, ModelOutline } from './editor/ModelOutline';
 import { ModelTreeBridge } from './editor/ModelTreeBridge';
 import { PanelResizer } from './editor/PanelResizer';
 import { ModelProperties } from './editor/ModelProperties';
@@ -53,6 +53,20 @@ function viewSettings() {
 function saveViewSettings(changes) {
     vscode.setState({ ...vscode.getState(), ...changes });
     vscode.postMessage({ type: 'viewSettings', settings: changes });
+}
+
+/**
+ * @param {BABYLON.AbstractMesh[]} meshes the meshes a skeleton deforms
+ * @returns {string | null} one name for them: the mesh, the node of the parts of one mesh (glTF
+ *   primitives), or the first with the number of the others
+ */
+function meshLabel(meshes) {
+    if (!meshes.length) return null;
+    if (meshes.length === 1) return meshes[0].name || '(unnamed)';
+    const parent = meshes[0].parent;
+    // A root parent (glTF __root__) groups the whole model, not one mesh
+    if (parent?.parent && meshes.every(mesh => mesh.parent === parent)) return parent.name || '(unnamed)';
+    return `${meshes[0].name || '(unnamed)'} +${meshes.length - 1}`;
 }
 
 /**
@@ -136,6 +150,8 @@ class Editor {
         this._changed = new Map();
         /** @type {Map<BABYLON.AbstractMesh, number>} meshes hidden in the 3D view only, with their layer mask */
         this._hiddenInView = new Map();
+        /** @type {BABYLON.Skeleton | null} skeleton of the current clip (the player tags and toggles) */
+        this._clipSkeleton = null;
         /** @type {Map<string, import('./editor/ModelOutline').ModelItemData>} nodes listed in the inspector, by the id tree commands use */
         this._inspectorObjects = new Map();
         this._panel = new PropertyPanel(root.querySelector('.inspector'), {
@@ -269,18 +285,23 @@ class Editor {
     }
 
     /**
-     * @returns {number} the width the model view needs for its player in one line (the controls at
-     *   their smallest, the slider at its minimum); measured while the view is shown
+     * @returns {number} the width the model view needs for its player bars in one line each (the
+     *   controls at their smallest, the slider at its minimum): the wider of the view bar on top and
+     *   the playback bar at the bottom; measured while the view is shown
      */
     _playerWidth() {
         const player = /** @type {HTMLElement} */ (this._root.querySelector('.player'));
-        const controls = /** @type {HTMLElement} */ (this._root.querySelector('.player__controls'));
-        if (controls.offsetParent) {
-            const { width } = controls.style;
-            controls.style.width = 'min-content';
+        const bars = /** @type {HTMLElement[]} */ ([...this._root.querySelectorAll('.player__controls')]);
+        if (bars[0]?.offsetParent) {
             const style = getComputedStyle(player);
-            this._minPlayerWidth = controls.getBoundingClientRect().width + parseFloat(style.left) + parseFloat(style.right);
-            controls.style.width = width;
+            const widest = Math.max(...bars.map((bar) => {
+                const { width } = bar.style;
+                bar.style.width = 'min-content';
+                const measured = bar.getBoundingClientRect().width;
+                bar.style.width = width;
+                return measured;
+            }));
+            this._minPlayerWidth = widest + parseFloat(style.left) + parseFloat(style.right);
         }
         return this._minPlayerWidth ?? 0;
     }
@@ -398,7 +419,7 @@ class Editor {
         toolbar.setOrbit(this._camera.autoOrbit);
         toolbar.setPlaying(false);
         toolbar.setClip(null);
-        toolbar.setSkeletonMode(false, this._highlighter.skeletonDisplay);
+        toolbar.setSkeletonMode({ available: false, active: false, display: this._highlighter.skeletonDisplay });
         this._scene.onAfterRenderObservable.add(() => {
             if (this._animations.current) {
                 toolbar.setProgress(this._animations.getProgress());
@@ -428,7 +449,8 @@ class Editor {
                 ? new BabylonJsonBinding(JSON.parse(new TextDecoder().decode(data)), container, this._scene, rootUrl)
                 : null;
             this._highlighter.clear();
-            this._toolbar.setSkeletonMode(false, this._highlighter.skeletonDisplay);
+            this._clipSkeleton = null;
+            this._syncSkeletonButtons();
             this._animations.dispose();
             this._container?.dispose();
             this._container = container;
@@ -830,19 +852,37 @@ class Editor {
      */
     _highlight(data) {
         ModelProperties.highlight(data, this._propertiesContext());
-        this._toolbar.setSkeletonMode(this._highlighter.isSkeletonMode, this._highlighter.skeletonDisplay);
+        this._syncSkeletonButtons();
         this._updateLayout();
     }
 
     /**
      * Toggles the model meshes or the bones in skeleton mode; the choice is kept in the webview state.
+     * Outside the skeleton mode (the mesh shown, no bones) both show the skeleton of the current
+     * clip, the mesh toggle hiding the mesh.
      * @param {'mesh' | 'bones'} part
      */
     _toggleSkeletonDisplay(part) {
-        const display = { ...this._highlighter.skeletonDisplay, [part]: !this._highlighter.skeletonDisplay[part] };
+        const entering = !this._highlighter.isSkeletonMode;
+        if (entering && !this._clipSkeleton) return;
+        const display = entering
+            ? { mesh: part !== 'mesh', bones: true }
+            : { ...this._highlighter.skeletonDisplay, [part]: !this._highlighter.skeletonDisplay[part] };
         this._highlighter.setSkeletonDisplay(display);
-        this._toolbar.setSkeletonMode(this._highlighter.isSkeletonMode, display);
+        if (entering) this._highlighter.showSkeleton(this._clipSkeleton);
+        this._syncSkeletonButtons();
         vscode.setState({ ...vscode.getState(), skeletonDisplay: display });
+    }
+
+    /** Shows the mesh / bones toggles as the skeleton mode and the current clip allow. */
+    _syncSkeletonButtons() {
+        const changed = this._toolbar.setSkeletonMode({
+            available: !!this._clipSkeleton,
+            active: this._highlighter.isSkeletonMode,
+            display: this._highlighter.skeletonDisplay,
+        });
+        // The player is wider with the toggles: it may no longer fit next to the inspector
+        if (changed) this._updateLayout();
     }
 
     /**
@@ -863,7 +903,15 @@ class Editor {
      */
     _showClipTags(clip) {
         const skeleton = clip && this._container ? ClipFrameEditor.skeletonOf(clip, this._container) : null;
-        this._toolbar.setClip(clip?.name ?? null, skeleton ? skeleton.name || '(unnamed)' : null);
+        const meshes = skeleton ? this._container.meshes.filter(mesh => mesh.skeleton === skeleton && mesh.getTotalVertices() > 0) : [];
+        this._clipSkeleton = skeleton;
+        this._toolbar.setClip(clip?.name ?? null, {
+            icon: clipIcon(clip),
+            skeleton: skeleton ? skeleton.name || '(unnamed)' : null,
+            mesh: meshLabel(meshes),
+            meshTitle: `Mesh of the current skeleton: ${meshes.slice(0, 10).map(mesh => mesh.name).join(', ')}${meshes.length > 10 ? ', …' : ''}`,
+        });
+        this._syncSkeletonButtons();
     }
 
     /**
