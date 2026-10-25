@@ -521,6 +521,9 @@ export class BabylonEditor {
                                             <button className="player__button player__mode" data-mode="wireframe" title="Show as lines (wireframe)">
                                                 <i className="codicon codicon-globe"></i>
                                             </button>
+                                            <button className="player__button player__vertices" title="Show the vertices (points over the model)">
+                                                <i className="codicon codicon-circle-small-filled"></i>
+                                            </button>
                                         </div>
                                         <div className="player__group player__group--skeleton player__group--hidden">
                                             <button className="player__button player__mesh" title="Hide mesh">

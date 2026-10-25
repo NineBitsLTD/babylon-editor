@@ -12,9 +12,9 @@ const OUTLINE_COLOR = BABYLON.Color3.FromHexString('#ff9f1c');
 
 /**
  * Visualizes the inspector selection in the 3D view: mesh outlines, the skeleton of a bone,
- * skeleton or clip (skeleton mode, where the model meshes can be hidden), and a marker for
- * a vertex. Helper meshes and hidden meshes are not part of the saved model; call clear()
- * before serializing the scene.
+ * skeleton or clip (skeleton mode: each view shows the meshes and / or the bones as its settings
+ * say, through the layer mask of its camera — CameraViews), and a marker for a vertex. Helper
+ * meshes are not part of the saved model; call clear() before serializing the scene.
  */
 export class SelectionHighlighter {
 
@@ -29,9 +29,7 @@ export class SelectionHighlighter {
         this._skeletonView = null;
         /** @type {BABYLON.Mesh | null} */
         this._marker = null;
-        /** Meshes hidden in skeleton mode -> their original layer mask. */
-        this._hidden = new Map();
-        /** @type {SkeletonDisplay} */
+        /** @type {SkeletonDisplay} what a new view shows in skeleton mode */
         this.skeletonDisplay = { mesh: true, bones: true };
         /** @type {Set<BABYLON.Bone>} bones not drawn in skeleton mode (view only, kept while switching objects) */
         this.hiddenBones = new Set();
@@ -67,18 +65,16 @@ export class SelectionHighlighter {
         this._outlined = [];
         this._skeletonView?.dispose();
         this._skeletonView = null;
-        this._showMeshes();
         this._marker?.dispose();
         this._marker = null;
     }
 
     /**
-     * Changes what the skeleton mode shows; applies immediately when a skeleton is shown.
+     * Changes what a new view shows in skeleton mode.
      * @param {SkeletonDisplay} display
      */
     setSkeletonDisplay(display) {
         this.skeletonDisplay = { ...display };
-        this._applySkeletonDisplay();
     }
 
     /**
@@ -98,8 +94,8 @@ export class SelectionHighlighter {
     }
 
     /**
-     * Enters skeleton mode: shows the bones as pyramids on top of the model and hides
-     * the model meshes according to skeletonDisplay.
+     * Enters skeleton mode: shows the bones as pyramids on top of the model (the views show the
+     * meshes and the bones as their settings say).
      * @param {BABYLON.Skeleton} skeleton
      * @param {BABYLON.Bone | BABYLON.TransformNode | null} [selected] bone to highlight
      */
@@ -107,7 +103,6 @@ export class SelectionHighlighter {
         this.clear();
         this._skeletonView = new SkeletonView(this._scene, skeleton, this.hiddenBones);
         this._skeletonView.setSelected(selected);
-        this._applySkeletonDisplay();
     }
 
     /** @returns {BABYLON.Bone | null} the bone highlighted in skeleton mode */
@@ -131,30 +126,6 @@ export class SelectionHighlighter {
      */
     selectBone(selected) {
         this._skeletonView?.setSelected(selected);
-    }
-
-    _applySkeletonDisplay() {
-        if (!this._skeletonView) return;
-        this._skeletonView.setVisible(this.skeletonDisplay.bones);
-        if (this.skeletonDisplay.mesh) {
-            this._showMeshes();
-        } else {
-            this._hideMeshes();
-        }
-    }
-
-    /** Hides the model meshes through the layer mask (no editor property controls it). */
-    _hideMeshes() {
-        for (const mesh of this._scene.meshes) {
-            if (mesh.name.startsWith('__editor') || this._hidden.has(mesh)) continue;
-            this._hidden.set(mesh, mesh.layerMask);
-            mesh.layerMask = 0;
-        }
-    }
-
-    _showMeshes() {
-        this._hidden.forEach((layerMask, mesh) => { mesh.layerMask = layerMask; });
-        this._hidden.clear();
     }
 
     /**

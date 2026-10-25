@@ -1,6 +1,11 @@
 import * as BABYLON from '@babylonjs/core';
 import { isJointTip, jointNodes } from './ModelOutline';
 
+/** Layer of the model meshes (Babylon's default layer mask): a view hides them by leaving it out of its camera's mask. */
+export const MODEL_LAYER = 0x0FFFFFFF;
+/** Layer of the bones: a view shows them when its camera's mask has it. */
+export const BONES_LAYER = 0x10000000;
+
 const BONE_COLOR = BABYLON.Color4.FromHexString('#ff9f1cff');
 const SELECTED_COLOR = BABYLON.Color4.FromHexString('#4fc1ffff');
 /** Base half-width of a pyramid relative to its length. */
@@ -130,22 +135,16 @@ export class SkeletonView {
      * @returns {BABYLON.Bone | null}
      */
     pickBone(x, y) {
-        if (!this._helper.isEnabled()) return null;
-        // Positions change every frame, the bounding info is computed at creation only
-        this._helper.refreshBoundingInfo();
         // With several views the active camera is the one rendered last: pick in the view under the mouse
         const camera = this._scene.cameraToUseForPointers ?? this._scene.activeCamera;
+        // A view that hides the bones does not pick them
+        if (!camera || !(camera.layerMask & BONES_LAYER)) return null;
+        // Positions change every frame, the bounding info is computed at creation only
+        this._helper.refreshBoundingInfo();
         const info = this._scene.pick(x, y, mesh => mesh === this._helper, false, camera);
         if (!info?.hit || info.faceId < 0) return null;
         const segment = this._segments[Math.floor(info.faceId / TRIANGLES_PER_BONE)];
         return segment ? this._skeleton.bones[segment.from] : null;
-    }
-
-    /**
-     * @param {boolean} visible
-     */
-    setVisible(visible) {
-        this._helper.setEnabled(visible);
     }
 
     dispose() {
@@ -173,6 +172,8 @@ export class SkeletonView {
         material.twoSidedLighting = true;
         mesh.material = material;
         mesh.isPickable = false;
+        // Each view shows or hides the bones through the layer mask of its camera
+        mesh.layerMask = BONES_LAYER;
         // Drawn after the model with a cleared depth buffer, so bones stay visible through the mesh
         mesh.renderingGroupId = 1;
         mesh.alwaysSelectAsActiveMesh = true;

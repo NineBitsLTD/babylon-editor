@@ -315,6 +315,8 @@ export class ModelEdits {
         const value = { ...json, id: newId() };
         delete value.uniqueId;
         delete value.parentId;
+        // The mask of a view (hidden meshes / bones) is not part of the camera
+        delete value.layerMask;
         const label = `Add ${json.name ?? 'the camera'} to the file`;
         if (this._binding()) {
             this._postOps(label, [{ op: 'insert', arrayPath: ['cameras'], value }]);

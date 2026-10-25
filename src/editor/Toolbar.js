@@ -48,6 +48,7 @@ export function layoutIcon({ side, count }) {
  * @property {() => void} onToggleBones shows/hides the bones in skeleton mode
  * @property {(view: EditorView) => void} onSelectView shows the model, the inspector or both
  * @property {(mode: RenderMode) => void} onSelectRenderMode shows the model with textures, without them or as lines
+ * @property {() => void} onToggleVertices shows / hides the vertices as points over the model
  * @property {(tag: PlayerTag) => void} onOpenTag a tag of the player was clicked: show its object
  * @property {() => ViewCamera[]} cameras the cameras the model view can be shown with (read when the
  *   Model button opens its menu)
@@ -94,6 +95,7 @@ export class Toolbar {
         this._skeletonGroup = root.querySelector('.player__group--skeleton');
         this._meshButton = root.querySelector('.player__mesh');
         this._bonesButton = root.querySelector('.player__bones');
+        this._verticesButton = root.querySelector('.player__vertices');
         /** @type {HTMLButtonElement[]} */
         this._viewButtons = [...root.querySelectorAll('.toolbar__view')];
         /** @type {HTMLButtonElement[]} */
@@ -109,6 +111,7 @@ export class Toolbar {
         this._playButton.addEventListener('click', () => this._handlers.onTogglePlay());
         this._meshButton.addEventListener('click', () => this._handlers.onToggleMesh());
         this._bonesButton.addEventListener('click', () => this._handlers.onToggleBones());
+        this._verticesButton.addEventListener('click', () => this._handlers.onToggleVertices());
         this._meshTag.addEventListener('click', () => this._handlers.onOpenTag('mesh'));
         this._skeletonTag.addEventListener('click', () => this._handlers.onOpenTag('skeleton'));
         this._clipTag.addEventListener('click', () => this._handlers.onOpenTag('clip'));
@@ -245,6 +248,14 @@ export class Toolbar {
      */
     setRenderMode(mode) {
         this._modeButtons.forEach(button => button.classList.toggle('player__button--active', button.dataset.mode === mode));
+    }
+
+    /**
+     * @param {boolean} shown the vertices are shown over the model
+     */
+    setVertices(shown) {
+        this._verticesButton.classList.toggle('player__button--active', shown);
+        this._verticesButton.title = shown ? 'Hide the vertices' : 'Show the vertices (points over the model)';
     }
 
     /**

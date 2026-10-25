@@ -20,6 +20,7 @@ import { ModelSerializer } from './editor/ModelSerializer';
 import { PropertyPanel } from './editor/PropertyPanel';
 import { SelectionHighlighter } from './editor/SelectionHighlighter';
 import { TextureImage } from './editor/TextureImage';
+import { ViewRendering } from './editor/ViewRendering';
 import { Toolbar } from './editor/Toolbar';
 
 const vscode = acquireVsCodeApi();
@@ -182,6 +183,7 @@ class Editor {
         /** @type {import('./editor/CameraViews').ViewLayout} the layout of the desktop view */
         this._layout = viewSettings().layout ?? { side: 'right', count: 1 };
         this._cameraMenu = new PopupMenu();
+        this._viewRendering = new ViewRendering(this._scene);
         // One to four views of the model, each with its camera (kept in the webview state)
         this._cameraViews = new CameraViews({
             scene: this._scene,
@@ -189,6 +191,12 @@ class Editor {
             previews: () => this._camera.views,
             onTagClick: (index, tag) => this._showViewCameraMenu(index, tag),
             onChange: () => this._saveCameraViews(),
+            defaults: () => ({ renderMode: viewSettings().renderMode ?? 'textured', display: { ...this._highlighter.skeletonDisplay } }),
+            isSkeletonMode: () => this._highlighter.isSkeletonMode,
+            onSelect: () => this._syncViewBar(),
+            onBeforeView: settings => this._viewRendering.beforeView(settings),
+            onAfterView: () => this._viewRendering.afterView(),
+            onVerticesNeeded: needed => this._viewRendering.setPointsNeeded(needed),
             state: vscode.getState()?.cameraViews,
         });
         // The model, the inspector or both (desktop), switched from the toolbar and kept in the
@@ -202,7 +210,7 @@ class Editor {
         /** @type {import('./editor/Toolbar').EditorView | null} */
         this._shown = null;
         new ResizeObserver(() => this._updateLayout()).observe(root.querySelector('.workspace'));
-        this._setRenderMode(viewSettings().renderMode ?? 'textured');
+        this._syncViewBar();
         this._edits = new ModelEdits({
             scene: this._scene,
             container: () => this._container,
@@ -341,7 +349,8 @@ class Editor {
         this._highlighter.clear();
         this._animations.dispose();
         this._animations.setContainer(this._container);
-        // Cameras of the model may be added or deleted: the views show them again
+        // Meshes and cameras of the model may be added or deleted: the views show them again
+        this._viewRendering.setContainer(this._container);
         this._cameraViews.apply();
         this._resetTree();
         this._inspectorObjects.clear();
@@ -394,7 +403,7 @@ class Editor {
             camera.setTarget(preview.target.clone());
         }
         const ref = this._cameraViews.addVirtual(camera);
-        this._cameraViews.setSlot(this._cameraViews.focus, ref);
+        this._cameraViews.setSlot(this._cameraViews.selected, ref);
         this._resetTree();
         this._revealObject(item => item.data?.kind === 'camera' && item.data.camera === camera);
     }
@@ -545,7 +554,9 @@ class Editor {
                 }
             },
             onSelectRenderMode: (mode) => {
-                this._setRenderMode(mode);
+                // The selected view; the mode is also the one of views set later
+                this._cameraViews.setSettings(this._cameraViews.selected, { renderMode: mode });
+                this._toolbar.setRenderMode(mode);
                 saveViewSettings({ renderMode: mode });
             },
             onSelectView: (view) => {
@@ -556,12 +567,17 @@ class Editor {
             },
             onResetView: () => {
                 // The camera of the view with the mouse: the preview camera goes to its framed position
-                const entry = this._cameraViews.resetFocused();
+                const entry = this._cameraViews.resetSelected();
                 if (entry?.kind === 'preview') this._camera.resetView(entry.camera);
                 this._saveCameraViews();
             },
             onToggleMesh: () => this._toggleSkeletonDisplay('mesh'),
             onToggleBones: () => this._toggleSkeletonDisplay('bones'),
+            onToggleVertices: () => {
+                const shown = !this._selectedViewSettings().vertices;
+                this._cameraViews.setSettings(this._cameraViews.selected, { vertices: shown });
+                this._toolbar.setVertices(shown);
+            },
             onOpenTag: tag => this._openTag(tag),
             cameras: () => this._cameraViews.cameras().map(entry => ({
                 id: entry.ref,
@@ -630,6 +646,7 @@ class Editor {
             this._changed.clear();
             this._fileFields = this._textBacked ? null : FileInfo.read(this._type, data);
             // The views show the cameras of the new model (through new copies) and the new preview camera
+            this._viewRendering.setContainer(container);
             this._cameraViews.setContainer(container);
             this._resetTree();
             this._inspectorObjects.clear();
@@ -851,6 +868,9 @@ class Editor {
             if (this._selection) {
                 this._highlight(this._selection.data);
                 this._highlighter.selectBone(selectedBone);
+            } else {
+                // Out of skeleton mode: the views show everything again
+                this._syncSkeletonButtons();
             }
         }
     }
@@ -914,19 +934,16 @@ class Editor {
         return /\.(glb|gltf|gltf2)$/i.test(source);
     }
 
-    /**
-     * Shows the model with textures, without them or as lines. Only the view changes: textures are
-     * switched off by Babylon's global material flags and lines by the scene's forced wireframe,
-     * so the materials (and the file) stay as they are.
-     * @param {import('./editor/Toolbar').RenderMode} mode
-     */
-    _setRenderMode(mode) {
-        const textures = mode !== 'solid';
-        for (const flag of Object.getOwnPropertyNames(BABYLON.MaterialFlags)) {
-            if (flag.endsWith('TextureEnabled')) BABYLON.MaterialFlags[flag] = textures;
-        }
-        this._scene.forceWireframe = mode === 'wireframe';
-        this._toolbar.setRenderMode(mode);
+    /** @returns {import('./editor/CameraViews').ViewSettings} the settings of the view the view bar acts on */
+    _selectedViewSettings() {
+        return this._cameraViews.settingsOf(this._cameraViews.selected);
+    }
+
+    /** The view bar shows the settings of the selected view. */
+    _syncViewBar() {
+        this._toolbar.setRenderMode(this._selectedViewSettings().renderMode);
+        this._toolbar.setVertices(!!this._selectedViewSettings().vertices);
+        this._syncSkeletonButtons();
     }
 
     /**
@@ -1027,29 +1044,33 @@ class Editor {
     }
 
     /**
-     * Toggles the model meshes or the bones in skeleton mode; the choice is kept in the webview state.
-     * Outside the skeleton mode (the mesh shown, no bones) both show the skeleton of the current
-     * clip, the mesh toggle hiding the mesh.
+     * Toggles the model meshes or the bones of the selected view in skeleton mode; the choice is
+     * kept with the view and is what views set later show. Outside the skeleton mode (the mesh shown,
+     * no bones) both show the skeleton of the current clip, the mesh toggle hiding the mesh.
      * @param {'mesh' | 'bones'} part
      */
     _toggleSkeletonDisplay(part) {
         const entering = !this._highlighter.isSkeletonMode;
         if (entering && !this._clipSkeleton) return;
-        const display = entering
-            ? { mesh: part !== 'mesh', bones: true }
-            : { ...this._highlighter.skeletonDisplay, [part]: !this._highlighter.skeletonDisplay[part] };
-        this._highlighter.setSkeletonDisplay(display);
+        const current = this._selectedViewSettings().display;
+        const display = entering ? { mesh: part !== 'mesh', bones: true } : { ...current, [part]: !current[part] };
         if (entering) this._highlighter.showSkeleton(this._clipSkeleton);
+        this._highlighter.setSkeletonDisplay(display);
+        this._cameraViews.setSettings(this._cameraViews.selected, { display });
         this._syncSkeletonButtons();
         vscode.setState({ ...vscode.getState(), skeletonDisplay: display });
     }
 
-    /** Shows the mesh / bones toggles as the skeleton mode and the current clip allow. */
+    /**
+     * Shows the mesh / bones toggles as the skeleton mode and the current clip allow, with the
+     * settings of the selected view; the views show the meshes and the bones as theirs say.
+     */
     _syncSkeletonButtons() {
+        this._cameraViews?.applyMasks();
         const changed = this._toolbar.setSkeletonMode({
             available: !!this._clipSkeleton,
             active: this._highlighter.isSkeletonMode,
-            display: this._highlighter.skeletonDisplay,
+            display: this._cameraViews ? this._selectedViewSettings().display : this._highlighter.skeletonDisplay,
         });
         // The player is wider with the toggles: it may no longer fit next to the inspector
         if (changed) this._updateLayout();
