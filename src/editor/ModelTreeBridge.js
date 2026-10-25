@@ -60,10 +60,13 @@ export class ModelTreeBridge {
     /**
      * @param {import('./ModelOutline').ModelItemData | undefined} data
      * @returns {string} `section:<name>` or `item:<kind>`; the whole timeline is `item:timeline`
-     *   (it cannot be renamed or deleted)
+     *   (it cannot be renamed or deleted); the preview camera is `preview:camera` (no commands:
+     *   it is not part of the file); a virtual camera is `item:virtualCamera`
      */
     _contextValue(data) {
         if (data?.kind === 'section') return `section:${data.name}`;
+        if (data?.kind === 'camera' && data.preview) return 'preview:camera';
+        if (data?.kind === 'camera' && data.virtual) return 'item:virtualCamera';
         if (data?.kind === 'clip' && data.clip.isTimeline) return 'item:timeline';
         return `item:${data?.kind ?? 'unknown'}`;
     }
@@ -79,7 +82,33 @@ export class ModelTreeBridge {
             children = this._register(parent?.children?.() ?? [], parentId);
             this._children.set(parentId, children);
         }
-        return children.map(item => ({
+        return children.map(item => this._node(item));
+    }
+
+    /**
+     * The first item of a section, or a section, a match accepts, with the nodes from its section
+     * down (what `TreeView.reveal` needs on the host). Only sections and their items are searched;
+     * the items of a section are created if they were not requested yet.
+     * @param {(item: import('./ModelOutline').TreeItem) => boolean} match
+     * @returns {{ item: import('./ModelOutline').TreeItem, nodes: ModelTreeNode[] } | null}
+     */
+    find(match) {
+        for (const section of this.getRoots()) {
+            if (match(section)) return { item: section, nodes: [this._node(section)] };
+            const sectionKey = this._key(section);
+            this.getChildren(sectionKey);
+            const item = this._children.get(sectionKey)?.find(match);
+            if (item) return { item, nodes: [this._node(section), this._node(item)] };
+        }
+        return null;
+    }
+
+    /**
+     * @param {import('./ModelOutline').TreeItem} item
+     * @returns {ModelTreeNode}
+     */
+    _node(item) {
+        return {
             ...this._annotate(item),
             uriPath: this._paths.get(this._key(item)),
             id: this._key(item),
@@ -88,7 +117,7 @@ export class ModelTreeBridge {
             icon: item.icon || 'circle-small',
             hasChildren: !!item.children,
             contextValue: this._contextValue(item.data),
-        }));
+        };
     }
 
     /**

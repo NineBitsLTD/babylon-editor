@@ -4,6 +4,7 @@ import * as fflate from 'fflate';
 import { AnimationController } from './editor/AnimationController';
 import { BabylonJsonBinding } from './editor/BabylonJsonBinding';
 import { CameraController } from './editor/CameraController';
+import { CameraViews } from './editor/CameraViews';
 import { ClipFrameEditor } from './editor/ClipFrameEditor';
 import { DocumentEditHistory, EditHistory } from './editor/EditHistory';
 import { FileInfo } from './editor/FileInfo';
@@ -13,6 +14,7 @@ import { ModelEdits, objectOf } from './editor/ModelEdits';
 import { clipIcon, ModelOutline } from './editor/ModelOutline';
 import { ModelTreeBridge } from './editor/ModelTreeBridge';
 import { PanelResizer } from './editor/PanelResizer';
+import { PopupMenu } from './editor/PopupMenu';
 import { ModelProperties } from './editor/ModelProperties';
 import { ModelSerializer } from './editor/ModelSerializer';
 import { PropertyPanel } from './editor/PropertyPanel';
@@ -43,6 +45,7 @@ function viewSettings() {
         renderMode: own.renderMode ?? shared.renderMode,
         uvColor: own.uvColor ?? shared.uvColor,
         showUv: own.showUv ?? shared.showUv,
+        layout: own.layout ?? shared.layout,
     };
 }
 
@@ -57,16 +60,18 @@ function saveViewSettings(changes) {
 
 /**
  * @param {BABYLON.AbstractMesh[]} meshes the meshes a skeleton deforms
- * @returns {string | null} one name for them: the mesh, the node of the parts of one mesh (glTF
- *   primitives), or the first with the number of the others
+ * @returns {{ node: BABYLON.Node, label: string } | null} the object of the mesh tag and its text:
+ *   the mesh, the node of the parts of one mesh (glTF primitives), or the first mesh with the
+ *   number of the others
  */
-function meshLabel(meshes) {
+function meshTag(meshes) {
     if (!meshes.length) return null;
-    if (meshes.length === 1) return meshes[0].name || '(unnamed)';
+    const name = node => node.name || '(unnamed)';
+    if (meshes.length === 1) return { node: meshes[0], label: name(meshes[0]) };
     const parent = meshes[0].parent;
     // A root parent (glTF __root__) groups the whole model, not one mesh
-    if (parent?.parent && meshes.every(mesh => mesh.parent === parent)) return parent.name || '(unnamed)';
-    return `${meshes[0].name || '(unnamed)'} +${meshes.length - 1}`;
+    if (parent?.parent && meshes.every(mesh => mesh.parent === parent)) return { node: parent, label: name(parent) };
+    return { node: meshes[0], label: `${name(meshes[0])} +${meshes.length - 1}` };
 }
 
 /**
@@ -152,6 +157,8 @@ class Editor {
         this._hiddenInView = new Map();
         /** @type {BABYLON.Skeleton | null} skeleton of the current clip (the player tags and toggles) */
         this._clipSkeleton = null;
+        /** @type {BABYLON.Node | null} what the mesh tag of the player opens */
+        this._clipMesh = null;
         /** @type {Map<string, import('./editor/ModelOutline').ModelItemData>} nodes listed in the inspector, by the id tree commands use */
         this._inspectorObjects = new Map();
         this._panel = new PropertyPanel(root.querySelector('.inspector'), {
@@ -170,6 +177,18 @@ class Editor {
             },
         });
         this._toolbar = this._createToolbar(root);
+        /** @type {import('./editor/CameraViews').ViewLayout} the layout of the desktop view */
+        this._layout = viewSettings().layout ?? { side: 'right', count: 1 };
+        this._cameraMenu = new PopupMenu();
+        // One to four views of the model, each with its camera (kept in the webview state)
+        this._cameraViews = new CameraViews({
+            scene: this._scene,
+            viewport: root.querySelector('.viewport'),
+            preview: () => this._camera.camera,
+            onTagClick: (index, tag) => this._showViewCameraMenu(index, tag),
+            onChange: () => this._saveCameraViews(),
+            state: vscode.getState()?.cameraViews,
+        });
         // The model, the inspector or both (desktop), switched from the toolbar and kept in the
         // webview state; a narrow editor shows the last single view instead of both
         const { view = 'desktop', singleView = 'inspector' } = viewSettings();
@@ -281,6 +300,12 @@ class Editor {
         }
         this._root.classList.toggle('editor--model', shown === 'model');
         this._root.classList.toggle('editor--inspector', shown === 'inspector');
+        // The inspector on the chosen side; the desktop view shows the camera views of its layout
+        const left = this._layout.side === 'left';
+        this._root.querySelector('.workspace').classList.toggle('workspace--inspector-left', left);
+        this._resizer.side = left ? 'left' : 'right';
+        this._cameraViews?.setCount(shown === 'desktop' ? this._layout.count : 1);
+        this._toolbar.setDesktopLayout(this._layout);
         this._toolbar.setLayout(shown, this._narrow || cramped);
     }
 
@@ -311,10 +336,11 @@ class Editor {
         this._highlighter.clear();
         this._animations.dispose();
         this._animations.setContainer(this._container);
-        this._tree.reset(ModelOutline.build(this._container, this._animations, this._type));
+        // Cameras of the model may be added or deleted: the views show them again
+        this._cameraViews.apply();
+        this._resetTree();
         this._inspectorObjects.clear();
         this._hiddenInView.clear();
-        vscode.postMessage({ type: 'treeReset' });
         this._showClipTags(this._animations.current);
         // The player is wider with animation controls: it may no longer fit next to the inspector
         this._updateLayout();
@@ -329,10 +355,13 @@ class Editor {
      */
     _runTreeCommand({ op, id, name, section, kind, extra }) {
         if (!this._container) throw new Error('No model is loaded');
-        // Reading commands also work for view-only formats
-        if (!this._canEdit && op !== 'info' && op !== 'copy') throw new Error(`Editing .${this._type} files is not supported`);
         const data = id ? (this._tree.get(id) ?? { data: this._inspectorObjects.get(id) })?.data : null;
         if (id && !data) throw new Error('The item no longer exists');
+        // Cameras of the views live in memory: also for view-only formats
+        if (op === 'add' && section === 'Cameras') return this._addVirtualCamera(kind, name);
+        if (data?.kind === 'camera' && data.virtual) return this._runVirtualCameraCommand(op, data.camera, name);
+        // Reading commands also work for view-only formats
+        if (!this._canEdit && op !== 'info' && op !== 'copy') throw new Error(`Editing .${this._type} files is not supported`);
         switch (op) {
             case 'info': return this._edits.info(data);
             case 'textureTargets': return this._edits.textureTargets();
@@ -343,6 +372,114 @@ class Editor {
             case 'paste': return this._edits.paste(section, extra?.object, extra?.sameFile, extra?.choices);
             default: throw new Error(`Unknown command ${op}`);
         }
+    }
+
+    /**
+     * A new camera of the views in memory (Add… on Cameras): shown in the view with the mouse
+     * controls and in the inspector.
+     * @param {string} type
+     * @param {string} name
+     */
+    _addVirtualCamera(type, name) {
+        const camera = this._edits.newCamera(type, name);
+        // Looking at the model like the preview camera
+        const preview = this._camera.camera;
+        if (preview instanceof BABYLON.ArcRotateCamera && camera instanceof BABYLON.ArcRotateCamera) {
+            Object.assign(camera, { alpha: preview.alpha, beta: preview.beta, radius: preview.radius });
+            camera.setTarget(preview.target.clone());
+        }
+        const ref = this._cameraViews.addVirtual(camera);
+        this._cameraViews.setSlot(this._cameraViews.focus, ref);
+        this._resetTree();
+        this._revealObject(item => item.data?.kind === 'camera' && item.data.camera === camera);
+    }
+
+    /**
+     * Rename… / Delete of a virtual camera (the host asked for the name or the confirmation).
+     * @param {string} op
+     * @param {BABYLON.Camera} camera
+     * @param {string} [name]
+     * @returns {any}
+     */
+    _runVirtualCameraCommand(op, camera, name) {
+        switch (op) {
+            case 'info': return { label: camera.name, canRename: true, dependents: [] };
+            case 'rename':
+                camera.name = name;
+                break;
+            case 'delete':
+                this._cameraViews.removeVirtual(camera);
+                if (this._selection?.data.kind === 'camera' && this._selection.data.camera === camera) this._showFile();
+                break;
+            default: throw new Error(`${op} is not available for a virtual camera`);
+        }
+        this._cameraViews.apply();
+        this._saveCameraViews();
+        this._resetTree();
+        return null;
+    }
+
+    /**
+     * Adds a virtual camera to the file, or removes a camera from the file keeping it as a virtual
+     * one (Add to scene (file) of the camera inspector); the inspector shows the camera again.
+     * @param {import('./editor/ModelOutline').ModelItemData & { kind: 'camera' }} data
+     * @param {boolean} inFile
+     */
+    _setCameraInFile(data, inFile) {
+        if (!this._canEdit || data.preview || inFile === !data.virtual) return;
+        if (inFile) {
+            const id = this._edits.addCamera(data.camera.serialize());
+            this._cameraViews.pinVirtual(data.camera, id);
+            this._resetTree();
+            // A .babylon text reloads the model (the selection follows by name), a scene has it now
+            this._revealObject(item => item.data?.kind === 'camera' && !item.data.virtual && !item.data.preview && item.data.camera.id === id);
+        } else {
+            const virtual = this._cameraViews.unpinFileCamera(data.camera);
+            this._edits.delete(data);
+            this._resetTree();
+            this._revealObject(item => item.data?.kind === 'camera' && item.data.camera === virtual);
+        }
+    }
+
+    /** Builds the model tree again (the cameras of the views changed) and tells the host. */
+    _resetTree() {
+        if (!this._container) return;
+        this._tree.reset(ModelOutline.build(this._container, this._animations, this._type, {
+            preview: this._camera.camera,
+            virtual: this._cameraViews.virtualCameras,
+        }));
+        vscode.postMessage({ type: 'treeReset' });
+        this._toolbar.setCameraCount(this._cameraViews.cameras().length);
+    }
+
+    /** Keeps the cameras of the views and the virtual cameras in the webview state. */
+    _saveCameraViews() {
+        vscode.setState({ ...vscode.getState(), cameraViews: this._cameraViews.state });
+    }
+
+    /**
+     * The menu of the camera tag of a view: the cameras to show in it, and the camera in the inspector.
+     * @param {number} index
+     * @param {HTMLElement} tag
+     */
+    _showViewCameraMenu(index, tag) {
+        const shown = this._cameraViews.entryOf(index);
+        const { left, bottom } = tag.getBoundingClientRect();
+        const actions = [
+            ...this._cameraViews.cameras().map(entry => ({
+                label: entry.label || '(unnamed)',
+                title: `${entry.label} (${entry.kind === 'file' ? 'in the file' : entry.kind})`,
+                icon: entry.ref === shown?.ref ? 'check' : entry.kind === 'file' ? 'pinned' : 'device-camera',
+                run: () => this._cameraViews.setSlot(index, entry.ref),
+            })),
+            ...(shown ? [{
+                label: 'Show in the inspector',
+                title: `Show ${shown.label} in the inspector and the model tree`,
+                icon: 'go-to-file',
+                run: () => this._revealObject(item => item.data?.kind === 'camera' && item.data.camera === shown.camera),
+            }] : []),
+        ];
+        this._cameraMenu.show(Math.max(0, left), bottom + 2, actions, { isDisabled: () => false, run: action => action.run() });
     }
 
     /** A click (not a camera drag) on a bone in the 3D view selects it; a click on the selected bone deselects it. */
@@ -412,9 +549,33 @@ class Editor {
                 saveViewSettings({ view, singleView: this._singleView });
                 this._updateLayout();
             },
-            onResetView: () => this._camera.resetView(),
+            onResetView: () => {
+                // The camera of the view with the mouse: the preview camera goes to its framed position
+                if (this._cameraViews.resetFocused() === 'preview') this._camera.resetView();
+                this._saveCameraViews();
+            },
             onToggleMesh: () => this._toggleSkeletonDisplay('mesh'),
             onToggleBones: () => this._toggleSkeletonDisplay('bones'),
+            onOpenTag: tag => this._openTag(tag),
+            cameras: () => this._cameraViews.cameras().map(entry => ({
+                id: entry.ref,
+                label: entry.label || '(unnamed)',
+                description: entry.kind === 'file' ? 'in the file' : entry.kind,
+                active: entry.ref === this._cameraViews.entryOf(0)?.ref,
+            })),
+            onSelectCamera: (ref) => {
+                this._cameraViews.setSlot(0, ref);
+                this._view = 'model';
+                this._singleView = 'model';
+                saveViewSettings({ view: 'model', singleView: 'model' });
+                this._updateLayout();
+            },
+            onSelectLayout: (layout) => {
+                this._layout = layout;
+                this._view = 'desktop';
+                saveViewSettings({ view: 'desktop', layout });
+                this._updateLayout();
+            },
         });
         toolbar.setOrbit(this._camera.autoOrbit);
         toolbar.setPlaying(false);
@@ -462,11 +623,12 @@ class Editor {
             this._history.clear();
             this._changed.clear();
             this._fileFields = this._textBacked ? null : FileInfo.read(this._type, data);
-            this._tree.reset(ModelOutline.build(container, this._animations, this._type));
+            // The views show the cameras of the new model (through new copies) and the new preview camera
+            this._cameraViews.setContainer(container);
+            this._resetTree();
             this._inspectorObjects.clear();
             this._hiddenInView.clear();
             this._highlighter.hiddenBones.clear();
-            vscode.postMessage({ type: 'treeReset' });
             this._showClipTags(this._animations.current);
             // The player is wider with animation controls: it may no longer fit next to the inspector
             this._updateLayout();
@@ -489,9 +651,10 @@ class Editor {
     /**
      * State kept across a reload of the model after a document change.
      * @returns {{ camera: object | null, clip: string | null, frame: number, selection: { kind: string, label: string } | null }}
+     *   camera - the preview camera (the cameras of the views stay: CameraViews)
      */
     _captureView() {
-        const camera = this._scene.activeCamera;
+        const camera = this._camera.camera;
         return {
             camera: camera instanceof BABYLON.ArcRotateCamera
                 ? { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() }
@@ -517,7 +680,7 @@ class Editor {
             const bone = this._container.skeletons.find(skeleton => skeleton.name === skeletonName)?.bones.find(candidate => candidate.name === boneName);
             if (bone) this._highlighter.setBoneHidden(bone, true);
         }
-        const camera = this._scene.activeCamera;
+        const camera = this._camera.camera;
         if (view.camera && camera instanceof BABYLON.ArcRotateCamera) {
             Object.assign(camera, { alpha: view.camera.alpha, beta: view.camera.beta, radius: view.camera.radius });
             camera.setTarget(view.camera.target);
@@ -720,6 +883,7 @@ class Editor {
             convertedFrom: window.payload?.convertedFrom ?? null,
             isHiddenInView: mesh => this._hiddenInView.has(mesh),
             setHiddenInView: (mesh, hidden) => this._setHiddenInView(mesh, hidden),
+            setCameraInFile: this._canEdit ? (data, inFile) => this._setCameraInFile(/** @type {any} */ (data), inFile) : null,
             showJointNodes: () => !!vscode.getState()?.showJointNodes,
             setShowJointNodes: (show) => vscode.setState({ ...vscode.getState(), showJointNodes: show }),
             fileFields: this._fileFields ?? null,
@@ -898,20 +1062,63 @@ class Editor {
     }
 
     /**
-     * Shows the names of the current clip and of the skeleton it animates in the player.
+     * Shows the names of the current clip, of the skeleton it animates and of the mesh of that
+     * skeleton in the player.
      * @param {import('./editor/AnimationController').AnimationClip | null | undefined} clip
      */
     _showClipTags(clip) {
         const skeleton = clip && this._container ? ClipFrameEditor.skeletonOf(clip, this._container) : null;
         const meshes = skeleton ? this._container.meshes.filter(mesh => mesh.skeleton === skeleton && mesh.getTotalVertices() > 0) : [];
         this._clipSkeleton = skeleton;
+        const mesh = meshTag(meshes);
+        this._clipMesh = mesh?.node ?? null;
         this._toolbar.setClip(clip?.name ?? null, {
             icon: clipIcon(clip),
             skeleton: skeleton ? skeleton.name || '(unnamed)' : null,
-            mesh: meshLabel(meshes),
-            meshTitle: `Mesh of the current skeleton: ${meshes.slice(0, 10).map(mesh => mesh.name).join(', ')}${meshes.length > 10 ? ', …' : ''}`,
+            mesh: mesh?.label ?? null,
+            meshTitle: `Mesh of the current skeleton: ${meshes.slice(0, 10).map(part => part.name).join(', ')}${meshes.length > 10 ? ', …' : ''}`,
         });
         this._syncSkeletonButtons();
+    }
+
+    /**
+     * Shows the object of a player tag in the inspector and selects it in the model tree. An object
+     * the tree does not list (a mesh below a root node) opens in its own inspector, its back button
+     * going to the root node, which the tree reveals.
+     * @param {import('./editor/Toolbar').PlayerTag} tag
+     */
+    _openTag(tag) {
+        const clip = this._animations.current;
+        if (tag === 'clip' && clip) {
+            this._revealObject(item => item.data?.kind === 'clip' && item.data.clip === clip);
+        } else if (tag === 'skeleton' && this._clipSkeleton) {
+            const skeleton = this._clipSkeleton;
+            this._revealObject(item => item.data?.kind === 'skeleton' && item.data.skeleton === skeleton);
+        } else if (tag === 'mesh' && this._clipMesh) {
+            const node = this._clipMesh;
+            const ancestors = [];
+            for (let parent = node; parent; parent = parent.parent) ancestors.push(parent);
+            const found = this._tree.find(item => item.data?.kind === 'node' && ancestors.includes(item.data.node));
+            if (found?.item.data.node === node) {
+                this._revealObject(item => item === found.item);
+            } else {
+                // A new way: back goes to the root node, then to the file
+                this._backStack = [];
+                this._openObject({ kind: 'node', node }, found?.item ?? null);
+                if (found) vscode.postMessage({ type: 'treeReveal', nodes: found.nodes, select: false });
+            }
+        }
+    }
+
+    /**
+     * Shows a tree item in the inspector and selects it in the model tree.
+     * @param {(item: import('./editor/ModelOutline').TreeItem) => boolean} match
+     */
+    _revealObject(match) {
+        const found = this._tree.find(match);
+        if (!found) return;
+        this._select(found.item);
+        vscode.postMessage({ type: 'treeReveal', nodes: found.nodes, select: true });
     }
 
     /**
@@ -944,6 +1151,12 @@ class Editor {
         if (property.transient) {
             property.set(value);
             this._panel.refresh();
+            // A renamed camera of the views: its tree item, the camera tags; a moved one is kept
+            if (this._selection?.data.kind === 'camera') {
+                vscode.postMessage({ type: 'treeChanged' });
+                this._cameraViews.apply();
+                this._saveCameraViews();
+            }
             return;
         }
         if (!this._canEdit) return;
@@ -996,6 +1209,8 @@ class Editor {
         vscode.postMessage({ type: 'treeChanged' });
         this._panel.refresh();
         this._showClipTags(this._animations.current);
+        // A camera of the file edited (or undone): the views showing it take its values
+        this._cameraViews.refreshCopies();
     }
 
     /**

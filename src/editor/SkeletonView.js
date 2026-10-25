@@ -133,7 +133,9 @@ export class SkeletonView {
         if (!this._helper.isEnabled()) return null;
         // Positions change every frame, the bounding info is computed at creation only
         this._helper.refreshBoundingInfo();
-        const info = this._scene.pick(x, y, mesh => mesh === this._helper);
+        // With several views the active camera is the one rendered last: pick in the view under the mouse
+        const camera = this._scene.cameraToUseForPointers ?? this._scene.activeCamera;
+        const info = this._scene.pick(x, y, mesh => mesh === this._helper, false, camera);
         if (!info?.hit || info.faceId < 0) return null;
         const segment = this._segments[Math.floor(info.faceId / TRIANGLES_PER_BONE)];
         return segment ? this._skeleton.bones[segment.from] : null;

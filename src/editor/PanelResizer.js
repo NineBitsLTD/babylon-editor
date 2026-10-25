@@ -1,6 +1,6 @@
 /**
- * Lets the user resize a side panel by dragging a splitter. The panel is assumed to sit
- * to the right of the splitter; its width is clamped so the neighbouring area keeps
+ * Lets the user resize a side panel by dragging a splitter. The panel sits to the right of the
+ * splitter, or to its left (`side`); its width is clamped so the neighbouring area keeps
  * at least `minRest` pixels. Double click restores the default width.
  */
 export class PanelResizer {
@@ -16,6 +16,8 @@ export class PanelResizer {
      * @param {(width: number) => void} [options.onChange] called when a drag ends
      */
     constructor(splitter, panel, { defaultWidth, width = defaultWidth, minWidth = 240, minRest = 200, onChange }) {
+        /** @type {'left' | 'right'} side of the panel: dragging the splitter towards it narrows it */
+        this.side = 'right';
         this._splitter = splitter;
         this._panel = panel;
         this._defaultWidth = defaultWidth;
@@ -46,7 +48,7 @@ export class PanelResizer {
             this._splitter.classList.add('splitter--active');
             const startX = event.clientX;
             const startWidth = this._panel.getBoundingClientRect().width;
-            const move = (moveEvent) => this.setWidth(startWidth + (startX - moveEvent.clientX));
+            const move = (moveEvent) => this.setWidth(startWidth + (this.side === 'left' ? moveEvent.clientX - startX : startX - moveEvent.clientX));
             const end = () => {
                 this._splitter.removeEventListener('pointermove', move);
                 this._splitter.removeEventListener('pointerup', end);

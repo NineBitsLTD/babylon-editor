@@ -29,22 +29,37 @@ export class PopupMenu {
      * @param {(action: import('./PropertyPanel').PanelAction) => boolean} options.isDisabled
      * @param {(action: import('./PropertyPanel').PanelAction) => void} options.run runs a chosen item
      * @param {() => void} [options.onChange] a color of an item was changed
+     * @param {number} [options.columns] items as icons only (their `svg`, the label in the
+     *   tooltip), in a grid of this many columns
      */
-    show(x, y, actions, { isDisabled, run, onChange }) {
+    show(x, y, actions, { isDisabled, run, onChange, columns }) {
         this.close();
         const read = value => typeof value === 'function' ? value() : value;
         const menu = document.createElement('div');
         menu.className = 'popup-menu';
+        if (columns) {
+            menu.classList.add('popup-menu--icons');
+            menu.style.gridTemplateColumns = `repeat(${columns}, auto)`;
+        }
         menu.setAttribute('role', 'menu');
         for (const action of actions) {
             if (action.isHidden?.()) continue;
             const item = document.createElement('button');
             item.className = 'popup-menu__item';
             item.setAttribute('role', 'menuitem');
-            const icon = document.createElement('i');
-            icon.className = `codicon codicon-${read(action.icon)}`;
             const label = read(action.label);
-            item.append(icon, document.createTextNode(label));
+            if (action.svg) {
+                const icon = document.createElement('span');
+                icon.className = 'popup-menu__svg';
+                icon.innerHTML = read(action.svg);
+                item.append(icon);
+            } else {
+                const icon = document.createElement('i');
+                icon.className = `codicon codicon-${read(action.icon)}`;
+                item.append(icon);
+            }
+            if (!columns) item.append(document.createTextNode(label));
+            item.classList.toggle('popup-menu__item--active', !!action.isActive?.());
             item.title = read(action.title) ?? label;
             item.disabled = isDisabled(action);
             item.addEventListener('click', () => {

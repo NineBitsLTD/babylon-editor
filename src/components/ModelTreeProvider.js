@@ -302,6 +302,28 @@ export class ModelTreeProvider {
     }
 
     /**
+     * Reveals an item the webview already shows in the inspector (its section is expanded).
+     * @param {ModelTreeNode[]} nodes from the section down to the item
+     * @param {boolean} select selects the item (the selection does not show it again); else the
+     *   item is only scrolled into view
+     */
+    async _reveal(nodes, select) {
+        const node = nodes[nodes.length - 1];
+        if (!node || !this._treeView) return;
+        // getParent finds the section among the known nodes
+        nodes.forEach(known => this._nodes.set(known.id, known));
+        if (select) {
+            this._shownId = node.id;
+            this._shownAt = Date.now();
+        }
+        try {
+            await this._treeView.reveal(node, { select, focus: false, expand: false });
+        } catch {
+            // The tree is not visible (another view is shown in the side bar)
+        }
+    }
+
+    /**
      * @param {string | null} id item to show in the inspector, null for the file view
      */
     _show(id) {
@@ -361,6 +383,10 @@ export class ModelTreeProvider {
                 if (panel !== this._panel) return true;
                 if (message.op === 'rename') this._run(() => this._rename({ id: message.id }));
                 else if (message.op === 'delete') this._run(() => this._delete({ id: message.id, label: '' }));
+                return true;
+            case 'treeReveal':
+                // An object opened from the webview (a tag of the player): selected or only shown
+                if (panel === this._panel) this._reveal(message.nodes ?? [], !!message.select);
                 return true;
             case 'treeDeselected':
                 // The inspector went back to the file view (its back button)

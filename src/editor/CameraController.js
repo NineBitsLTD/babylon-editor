@@ -1,5 +1,8 @@
 import * as BABYLON from '@babylonjs/core';
 
+/** Name of the camera the editor shows the model with (Babylon names it "default camera"). */
+const PREVIEW_CAMERA_NAME = 'Preview camera';
+
 /**
  * Owns the orbit camera: frames the loaded model and keeps the auto-orbit state across reloads.
  * Auto-orbit pauses while the user interacts and resumes after a short idle delay. The left button
@@ -17,6 +20,8 @@ export class CameraController {
         this._orbitSpeed = orbitSpeed;
         /** @type {{ alpha: number, beta: number, radius: number, target: BABYLON.Vector3 } | null} */
         this._home = null;
+        /** @type {BABYLON.Camera | null} the preview camera (not part of the model) */
+        this.camera = null;
         scene.onBeforeRenderObservable.add(() => this._updatePanning());
     }
 
@@ -33,9 +38,15 @@ export class CameraController {
      */
     frame({ frontIsPositiveZ = false } = {}) {
         this._refreshSkinnedBounds();
+        // The old preview camera is replaced (disposed), not the camera of another view; the views
+        // give the mouse controls (CameraViews)
+        this._scene.activeCameras = [];
+        this._scene.activeCamera = this.camera;
         // createDefaultCameraOrLight(…, replace) would also dispose the lights of the model
-        this._scene.createDefaultCamera(true, true, true);
+        this._scene.createDefaultCamera(true, true, false);
         const camera = this._scene.activeCamera;
+        camera.name = PREVIEW_CAMERA_NAME;
+        this.camera = camera;
         if (frontIsPositiveZ && camera instanceof BABYLON.ArcRotateCamera) camera.alpha += Math.PI;
         if (!this._scene.lights.length) this._scene.createDefaultLight();
         this._home = camera instanceof BABYLON.ArcRotateCamera
@@ -44,9 +55,9 @@ export class CameraController {
         this._applyAutoOrbit();
     }
 
-    /** Moves the camera back to the position it had when the model was framed. */
+    /** Moves the preview camera back to the position it had when the model was framed. */
     resetView() {
-        const camera = this._scene.activeCamera;
+        const camera = this.camera;
         if (!this._home || !(camera instanceof BABYLON.ArcRotateCamera)) return;
         camera.inertialAlphaOffset = camera.inertialBetaOffset = camera.inertialRadiusOffset = 0;
         camera.inertialPanningX = camera.inertialPanningY = 0;
@@ -60,11 +71,15 @@ export class CameraController {
      * distance (the movement is spread over the frames of the panning inertia).
      */
     _updatePanning() {
-        const camera = this._scene.activeCamera;
-        if (!(camera instanceof BABYLON.ArcRotateCamera) || !camera.radius) return;
-        const height = this._scene.getEngine().getRenderHeight();
-        const pixelsPerUnit = height / (2 * camera.radius * Math.tan(camera.fov / 2));
-        camera.panningSensibility = pixelsPerUnit / (1 - camera.panningInertia);
+        const scene = this._scene;
+        // Every shown view: the preview camera, the copies of file cameras, virtual cameras
+        const cameras = scene.activeCameras?.length ? scene.activeCameras : [scene.activeCamera];
+        for (const camera of cameras) {
+            if (!(camera instanceof BABYLON.ArcRotateCamera) || !camera.radius) continue;
+            const height = scene.getEngine().getRenderHeight() * camera.viewport.height;
+            const pixelsPerUnit = height / (2 * camera.radius * Math.tan(camera.fov / 2));
+            camera.panningSensibility = pixelsPerUnit / (1 - camera.panningInertia);
+        }
     }
 
     /**
@@ -93,7 +108,8 @@ export class CameraController {
     }
 
     _applyAutoOrbit() {
-        const camera = this._scene.activeCamera;
+        // Only the preview camera orbits: the cameras of the model are not moved
+        const camera = this.camera;
         if (!(camera instanceof BABYLON.ArcRotateCamera)) return;
         camera.useAutoRotationBehavior = this._autoOrbit;
         if (camera.autoRotationBehavior) {

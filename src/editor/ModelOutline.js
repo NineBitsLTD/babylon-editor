@@ -22,7 +22,7 @@ import { formatNumber } from './DataTable';
  *   { kind: 'skeleton', skeleton: BABYLON.Skeleton } |
  *   { kind: 'bone', bone: BABYLON.Bone } |
  *   { kind: 'clip', clip: import('./AnimationController').AnimationClip } |
- *   { kind: 'camera', camera: BABYLON.Camera } |
+ *   { kind: 'camera', camera: BABYLON.Camera, preview?: boolean, virtual?: boolean } |
  *   { kind: 'light', light: BABYLON.Light } |
  *   { kind: 'shadowGenerator', generator: BABYLON.ShadowGenerator } |
  *   { kind: 'file' }
@@ -131,11 +131,17 @@ export class ModelOutline {
      * @param {BABYLON.AssetContainer} container
      * @param {import('./AnimationController').AnimationController} animations
      * @param {string} [fileType] extension without the dot; sections the format cannot contain are left out
+     * @param {{ preview: BABYLON.Camera | null, virtual: BABYLON.Camera[] }} [viewCameras] the cameras of
+     *   the views that are not in the file: Cameras lists the preview camera first (`preview: true`),
+     *   then the cameras of the file (pinned), then the virtual cameras (`virtual: true`); the section
+     *   is there for every format
      * @returns {TreeItem[]}
      */
-    static build(container, animations, fileType = '') {
+    static build(container, animations, fileType = '', viewCameras = { preview: null, virtual: [] }) {
+        const previewCamera = viewCameras.preview;
         const outline = new ModelOutline(container, animations);
-        const allowed = FORMAT_SECTIONS[fileType.toLowerCase()];
+        const formatSections = FORMAT_SECTIONS[fileType.toLowerCase()];
+        const allowed = formatSections ? [...formatSections, 'Cameras'] : formatSections;
         const sections = [
             outline._section('Nodes', 'package', () => outline._nodeItems(outline._rootNodes())),
             outline._section('Materials', 'symbol-color', () => container.materials.map(material => outline._materialItem(material))),
@@ -146,7 +152,11 @@ export class ModelOutline {
                 ...(animations.frames ? [outline._clipItem(animations.frames)] : []),
                 ...animations.clips.map(clip => outline._clipItem(clip)),
             ]),
-            outline._section('Cameras', 'device-camera', () => container.cameras.map(camera => outline._cameraItem(camera))),
+            outline._section('Cameras', 'device-camera', () => [
+                ...(previewCamera ? [outline._cameraItem(previewCamera, 'preview')] : []),
+                ...container.cameras.map(camera => outline._cameraItem(camera, 'file')),
+                ...viewCameras.virtual.map(camera => outline._cameraItem(camera, 'virtual')),
+            ]),
             outline._section('Lights', 'lightbulb', () => container.lights.map(light => outline._lightItem(light))),
         ];
         return allowed ? sections.filter(section => allowed.includes(section.label())) : sections;
@@ -273,15 +283,20 @@ export class ModelOutline {
 
     /**
      * @param {BABYLON.Camera} camera
+     * @param {'preview' | 'file' | 'virtual'} kind the camera of the preview, a camera of the file
+     *   (pinned) or a camera of the views only in memory
      * @returns {TreeItem}
      */
-    _cameraItem(camera) {
+    _cameraItem(camera, kind) {
+        const data = { kind: 'camera', camera };
+        if (kind === 'preview') data.preview = true;
+        if (kind === 'virtual') data.virtual = true;
         return {
-            id: this._id('camera'),
+            id: this._id(`${kind}-camera`),
             label: () => camera.name || '(unnamed)',
-            icon: 'device-camera',
-            description: () => camera.getClassName(),
-            data: { kind: 'camera', camera },
+            icon: kind === 'file' ? 'pinned' : 'device-camera',
+            description: () => `${kind === 'file' ? 'in the file' : kind} · ${camera.getClassName()}`,
+            data: /** @type {ModelItemData} */ (data),
         };
     }
 

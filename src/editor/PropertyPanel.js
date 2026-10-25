@@ -46,6 +46,8 @@ const COLLAPSED_BY_DEFAULT = new Set(['Other file fields']);
  * @property {{ value: string, label: string }[]} [colors] preset colors (hex) shown with a color picker
  *   next to the item of a menu (`PopupMenu`), e.g. the color of the UV layout
  * @property {() => string} [color] the current color
+ * @property {string | (() => string)} [svg] markup of an icon drawn by the editor, used instead of
+ *   the codicon in a `PopupMenu`
  * @property {(color: string) => void} [setColor]
  */
 

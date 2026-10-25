@@ -493,11 +493,13 @@ export class BabylonEditor {
                 <div className="editor">
                     <div className="toolbar">
                         <div className="toolbar__group toolbar__views">
-                            <button className="toolbar__view" data-view="desktop" title="Show the model and the inspector">
-                                <i className="codicon codicon-layout"></i>
+                            <button className="toolbar__view toolbar__view--menu" data-view="desktop" title="Show the model and the inspector: choose a layout…">
+                                <span className="toolbar__view-icon"></span>
+                                <i className="codicon codicon-chevron-down toolbar__view-more"></i>
                             </button>
                             <button className="toolbar__view" data-view="model" title="Show only the model">
                                 <i className="codicon codicon-device-camera"></i>
+                                <i className="codicon codicon-chevron-down toolbar__view-more"></i>
                             </button>
                             <button className="toolbar__view" data-view="inspector" title="Show only the inspector">
                                 <i className="codicon codicon-list-tree"></i>
@@ -509,42 +511,44 @@ export class BabylonEditor {
                             <canvas className="canvas"></canvas>
                             <div className="status status--hidden"></div>
                             <div className="player">
-                                <div className="player__controls player__controls--view">
-                                    <div className="player__group">
-                                        <button className="player__button player__mode" data-mode="textured" title="Show with textures">
-                                            <i className="codicon codicon-file-media"></i>
-                                        </button>
-                                        <button className="player__button player__mode" data-mode="solid" title="Show without textures">
-                                            <i className="codicon codicon-circle-large-filled"></i>
-                                        </button>
-                                        <button className="player__button player__mode" data-mode="wireframe" title="Show as lines (wireframe)">
-                                            <i className="codicon codicon-globe"></i>
+                                <div className="player__top">
+                                    <div className="player__controls player__controls--view">
+                                        <div className="player__group">
+                                            <button className="player__button player__mode" data-mode="textured" title="Show with textures">
+                                                <i className="codicon codicon-file-media"></i>
+                                            </button>
+                                            <button className="player__button player__mode" data-mode="solid" title="Show without textures">
+                                                <i className="codicon codicon-circle-large-filled"></i>
+                                            </button>
+                                            <button className="player__button player__mode" data-mode="wireframe" title="Show as lines (wireframe)">
+                                                <i className="codicon codicon-globe"></i>
+                                            </button>
+                                        </div>
+                                        <div className="player__group player__group--skeleton player__group--hidden">
+                                            <button className="player__button player__mesh" title="Hide mesh">
+                                                <i className="codicon codicon-package"></i>
+                                            </button>
+                                            <button className="player__button player__bones" title="Hide bones">
+                                                <i className="codicon codicon-person"></i>
+                                            </button>
+                                        </div>
+                                        <button className="player__button player__reset" title="Reset the view (camera back to the start position)">
+                                            <i className="codicon codicon-home"></i>
                                         </button>
                                     </div>
-                                    <div className="player__group player__group--skeleton player__group--hidden">
-                                        <button className="player__button player__mesh" title="Hide mesh">
-                                            <i className="codicon codicon-package"></i>
-                                        </button>
-                                        <button className="player__button player__bones" title="Hide bones">
-                                            <i className="codicon codicon-person"></i>
-                                        </button>
-                                    </div>
-                                    <button className="player__button player__reset" title="Reset the view (camera back to the start position)">
-                                        <i className="codicon codicon-home"></i>
-                                    </button>
                                 </div>
                                 <div className="player__bottom">
                                     <div className="player__tags">
-                                        <span className="player__tag player__clip player__tag--hidden">
-                                            <i className="codicon codicon-play-circle"></i>
-                                            <span className="player__tag-name"></span>
-                                        </span>
                                         <span className="player__tag player__mesh-name player__tag--hidden">
                                             <i className="codicon codicon-symbol-structure"></i>
                                             <span className="player__tag-name"></span>
                                         </span>
                                         <span className="player__tag player__skeleton player__tag--hidden">
                                             <i className="codicon codicon-person"></i>
+                                            <span className="player__tag-name"></span>
+                                        </span>
+                                        <span className="player__tag player__clip player__tag--hidden">
+                                            <i className="codicon codicon-play-circle"></i>
                                             <span className="player__tag-name"></span>
                                         </span>
                                     </div>

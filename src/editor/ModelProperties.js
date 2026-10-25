@@ -27,6 +27,9 @@ import { texturePreview } from './TextureImage';
  * @property {import('./BabylonJsonBinding').BabylonJsonBinding | null} binding the document binding of a .babylon text (null for other formats)
  * @property {(mesh: BABYLON.AbstractMesh) => boolean} isHiddenInView whether a mesh is hidden in the 3D view only
  * @property {(mesh: BABYLON.AbstractMesh, hidden: boolean) => void} setHiddenInView hides a mesh in the 3D view
+ * @property {((data: ModelItemData, inFile: boolean) => void) | null} setCameraInFile adds a virtual
+ *   camera to the file, or removes a camera from the file keeping it as a virtual one (null when the
+ *   format cannot be edited)
  * @property {() => boolean} showJointNodes whether node lists show the joint nodes of skeletons
  * @property {(show: boolean) => void} setShowJointNodes
  *   without changing the model (the file keeps it as it is)
@@ -359,6 +362,8 @@ export class ModelProperties {
     static describe(data, context) {
         const content = ModelProperties._describe(data, context);
         const fields = ModelProperties._formatFields(data, context);
+        // The preview camera and the virtual ones are not in the file: their fields change the view only
+        if (data.kind === 'camera' && (data.preview || data.virtual)) fields.forEach((field) => { field.transient = true; });
         if (fields.length) content.properties = [...(content.properties ?? []), { label: 'Other file fields', type: 'section' }, ...fields];
         return content;
     }
@@ -408,7 +413,7 @@ export class ModelProperties {
             case 'bone': return ModelProperties._bone(data.bone, context);
             case 'clip': return ModelProperties._clip(data.clip, context);
             case 'file': return ModelProperties._file(context);
-            case 'camera': return ModelProperties._camera(data.camera);
+            case 'camera': return ModelProperties._camera(data, context);
             case 'light': return ModelProperties._light(data.light);
             case 'shadowGenerator': return ModelProperties._shadowGenerator(data.generator);
             default: return { title: data.name, notice: 'Expand the section to browse its items.' };
@@ -822,11 +827,15 @@ export class ModelProperties {
     }
 
     /**
-     * A camera of the model (the editor views the model with its own camera).
-     * @param {BABYLON.Camera} camera
+     * A camera of the file, the preview camera or a virtual camera of the views: the properties of
+     * the last two are transient (they change the view, not the file, and are not undone). Add to
+     * scene (file) puts a virtual camera into the file or takes a camera of the file out of it.
+     * @param {ModelItemData & { kind: 'camera' }} data
+     * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _camera(camera) {
+    static _camera(data, { setCameraInFile }) {
+        const { camera, preview = false, virtual = false } = data;
         const properties = [
             textProperty(camera, 'name'),
             readonlyProperty('Type', () => camera.getClassName()),
@@ -845,10 +854,25 @@ export class ModelProperties {
         }
         if (camera.mode === BABYLON.Camera.PERSPECTIVE_CAMERA) properties.push(numberProperty(camera, 'fov', 'Field of view (rad)'));
         properties.push(numberProperty(camera, 'minZ', 'Near plane'), numberProperty(camera, 'maxZ', 'Far plane'));
+        if (preview || virtual) properties.forEach((property) => { property.transient = true; });
+        if (!preview && setCameraInFile) {
+            properties.splice(1, 0, {
+                label: 'Add to scene (file)',
+                type: 'boolean',
+                // Its own undoable change of the file, not a property edit
+                transient: true,
+                get: () => !virtual,
+                set: value => setCameraInFile(data, !!value),
+            });
+        }
         return {
-            title: 'Camera',
+            title: preview ? 'Preview camera' : virtual ? 'Virtual camera' : 'Camera',
             subtitle: () => camera.name,
-            notice: 'A camera stored in the model; the editor shows the model with its own camera.',
+            notice: preview
+                ? 'The camera the editor shows the model with. Changes affect the view only: they are not saved to the file and are not undone.'
+                : virtual
+                    ? 'A camera of the views, kept in memory only: changes affect the view. Add to scene (file) puts it into the file.'
+                    : 'A camera stored in the file. A view shows it through a copy: moving it with the mouse does not change the file (Reset view takes the file values again); edit it here.',
             twoColumns: true,
             properties,
         };

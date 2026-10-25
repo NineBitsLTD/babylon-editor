@@ -67,6 +67,10 @@ h1 {
 	display: flex;
 	flex: 1;
 	min-height: 0;
+
+	&--inspector-left {
+		flex-direction: row-reverse;
+	}
 }
 
 .toolbar {
@@ -120,6 +124,28 @@ h1 {
 		&--hidden {
 			display: none;
 		}
+
+		&--menu {
+			width: auto;
+			padding: 0 2px;
+
+			.toolbar__view-more {
+				display: inline-block;
+			}
+		}
+
+		&-more {
+			display: none;
+			font-size: 10px;
+		}
+
+		&-icon {
+			display: flex;
+
+			svg {
+				display: block;
+			}
+		}
 	}
 }
 
@@ -129,8 +155,36 @@ h1 {
 	min-width: 0;
 }
 
+.views {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+
+	&__view {
+		position: absolute;
+		display: flex;
+		align-items: flex-start;
+		justify-content: flex-end;
+		padding: 8px;
+		border: 1px solid transparent;
+
+		&--top {
+			padding-top: 48px;
+		}
+
+		&--focused {
+			border-color: var(--vscode-focusBorder);
+		}
+	}
+
+	&__tag {
+		max-width: 60%;
+	}
+}
+
 .player {
 	position: absolute;
+	z-index: 1;
 	inset: 8px;
 	display: flex;
 	flex-direction: column;
@@ -138,6 +192,7 @@ h1 {
 	gap: 4px;
 	pointer-events: none;
 
+	&__top,
 	&__bottom {
 		display: flex;
 		flex-direction: column;
@@ -156,6 +211,10 @@ h1 {
 		background-color: color-mix(in srgb, var(--vscode-editorWidget-background) 85%, transparent);
 
 		&:has(.player__animation:not(.player__animation--hidden)) {
+			align-self: stretch;
+		}
+
+		&--view {
 			align-self: stretch;
 		}
 	}
@@ -235,8 +294,13 @@ h1 {
 		white-space: nowrap;
 		font-size: 11px;
 		pointer-events: auto;
+		cursor: pointer;
 		color: var(--vscode-badge-foreground);
 		background-color: var(--vscode-badge-background);
+
+		&:hover {
+			outline: 1px solid var(--vscode-focusBorder);
+		}
 
 		.codicon {
 			flex-shrink: 0;
@@ -1175,6 +1239,25 @@ h1 {
 	border-radius: 5px;
 	box-shadow: 0 2px 8px var(--vscode-widget-shadow);
 
+	&--icons {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+
+		.popup-menu__item {
+			justify-content: center;
+			padding: 4px;
+		}
+	}
+
+	&__svg {
+		display: flex;
+
+		svg {
+			display: block;
+		}
+	}
+
 	&__item {
 		display: flex;
 		align-items: center;
@@ -1199,6 +1282,10 @@ h1 {
 		&:disabled {
 			opacity: 0.5;
 			cursor: default;
+		}
+
+		&--active {
+			outline: 1px solid var(--vscode-focusBorder);
 		}
 	}
 

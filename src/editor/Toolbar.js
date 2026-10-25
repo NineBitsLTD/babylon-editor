@@ -1,3 +1,43 @@
+import { PopupMenu } from './PopupMenu';
+
+/** @typedef {import('./CameraViews').ViewLayout} ViewLayout */
+
+/** The layouts of the desktop view: the inspector on the left or on the right, 1 to 4 camera views. */
+const LAYOUTS = /** @type {ViewLayout[]} */ ([
+    ...[1, 2, 3, 4].map(count => ({ side: 'left', count })),
+    ...[1, 2, 3, 4].map(count => ({ side: 'right', count })),
+]);
+
+/** Camera views of each count in the 2×2 cells next to the inspector: [column, row, columns, rows]. */
+const LAYOUT_CELLS = {
+    1: [[0, 0, 2, 2]],
+    2: [[0, 0, 2, 1], [0, 1, 2, 1]],
+    3: [[0, 0, 2, 1], [0, 1, 1, 1], [1, 1, 1, 1]],
+    4: [[0, 0, 1, 1], [1, 0, 1, 1], [0, 1, 1, 1], [1, 1, 1, 1]],
+};
+
+/**
+ * An icon of a layout on a grid of 3×2 square cells: the inspector is the column of two cells on
+ * its side (filled), the camera views share the 2×2 cells next to it.
+ * @param {ViewLayout} layout
+ * @returns {string} svg markup
+ */
+export function layoutIcon({ side, count }) {
+    const cell = 7;
+    const gap = 1;
+    const rect = (column, row, columns, rows, filled) => `<rect x="${column * cell + gap / 2 + 0.5}" y="${row * cell + gap / 2 + 0.5}" width="${columns * cell - gap - 1}" height="${rows * cell - gap - 1}" rx="1"`
+        + ` fill="${filled ? 'currentColor' : 'none'}" fill-opacity="0.4" stroke="currentColor" stroke-width="1"/>`;
+    const cameraColumn = side === 'left' ? 1 : 0;
+    const cameras = LAYOUT_CELLS[count].map(([column, row, columns, rows]) => rect(cameraColumn + column, row, columns, rows, false));
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${3 * cell + 1}" height="${2 * cell + 1}" viewBox="0 0 ${3 * cell + 1} ${2 * cell + 1}">`
+        + `${rect(side === 'left' ? 0 : 2, 0, 1, 2, true)}${cameras.join('')}</svg>`;
+}
+
+/**
+ * A camera the model view can be shown with.
+ * @typedef {{ id: string, label: string, description?: string, active: boolean }} ViewCamera
+ */
+
 /**
  * @typedef {object} ToolbarHandlers
  * @property {() => void} onToggleOrbit
@@ -8,7 +48,14 @@
  * @property {() => void} onToggleBones shows/hides the bones in skeleton mode
  * @property {(view: EditorView) => void} onSelectView shows the model, the inspector or both
  * @property {(mode: RenderMode) => void} onSelectRenderMode shows the model with textures, without them or as lines
+ * @property {(tag: PlayerTag) => void} onOpenTag a tag of the player was clicked: show its object
+ * @property {() => ViewCamera[]} cameras the cameras the model view can be shown with (read when the
+ *   Model button opens its menu)
+ * @property {(id: string) => void} onSelectCamera shows the model alone through a camera
+ * @property {(layout: ViewLayout) => void} onSelectLayout shows the model and the inspector in a layout
  */
+
+/** @typedef {'mesh' | 'skeleton' | 'clip'} PlayerTag */
 
 /** @typedef {'textured' | 'solid' | 'wireframe'} RenderMode */
 
@@ -19,7 +66,7 @@ const SLIDER_MAX = 1000;
 /**
  * Binds the controls rendered by BabylonEditor._getHtmlForWebview to editor actions and reflects
  * the editor state back into them: the toolbar above (view switch) and the player
- * in the model view (render modes, skeleton mesh / bones toggles, reset view, auto-orbit, play / pause, seek slider, the name of the current clip).
+ * in the model view (render modes, skeleton mesh / bones toggles, reset view, auto-orbit, play / pause, seek slider, the tags of the current mesh, skeleton and clip; the camera tags of the views are CameraViews').
  * Contains no Babylon logic.
  */
 export class Toolbar {
@@ -52,6 +99,7 @@ export class Toolbar {
         /** @type {HTMLButtonElement[]} */
         this._modeButtons = [...root.querySelectorAll('.player__mode')];
         this._isSeeking = false;
+        this._cameraMenu = new PopupMenu();
         this._bindEvents();
     }
 
@@ -61,10 +109,22 @@ export class Toolbar {
         this._playButton.addEventListener('click', () => this._handlers.onTogglePlay());
         this._meshButton.addEventListener('click', () => this._handlers.onToggleMesh());
         this._bonesButton.addEventListener('click', () => this._handlers.onToggleBones());
+        this._meshTag.addEventListener('click', () => this._handlers.onOpenTag('mesh'));
+        this._skeletonTag.addEventListener('click', () => this._handlers.onOpenTag('skeleton'));
+        this._clipTag.addEventListener('click', () => this._handlers.onOpenTag('clip'));
         this._modeButtons.forEach(button => button.addEventListener('click', () => {
             this._handlers.onSelectRenderMode(/** @type {RenderMode} */ (button.dataset.mode));
         }));
         this._viewButtons.forEach(button => button.addEventListener('click', () => {
+            // With several cameras the Model button is a menu of the camera to show the model with
+            if (button.dataset.view === 'model' && button.classList.contains('toolbar__view--menu')) {
+                this._showCameraMenu(button);
+                return;
+            }
+            if (button.dataset.view === 'desktop') {
+                this._showLayoutMenu(button);
+                return;
+            }
             this._handlers.onSelectView(/** @type {EditorView} */ (button.dataset.view));
         }));
         this._slider.max = String(SLIDER_MAX);
@@ -118,6 +178,55 @@ export class Toolbar {
         Toolbar._setTag(this._meshTag, this._meshName, name !== null ? mesh : null, meshTitle);
         Toolbar._setTag(this._skeletonTag, this._skeletonName, name !== null ? skeleton : null, `Skeleton of the current animation: ${skeleton}`);
         this._animationGroup.classList.toggle('player__animation--hidden', name === null);
+    }
+
+    /**
+     * Makes the Model button a menu of cameras when the model view can be shown with more than one.
+     * @param {number} count the cameras the model view can be shown with
+     */
+    setCameraCount(count) {
+        const button = this._viewButtons.find(candidate => candidate.dataset.view === 'model');
+        if (!button) return;
+        button.classList.toggle('toolbar__view--menu', count > 1);
+        button.title = count > 1 ? 'Show only the model, through a camera…' : 'Show only the model';
+    }
+
+    /**
+     * Shows the icon of the layout of the desktop view on its button.
+     * @param {ViewLayout} layout
+     */
+    setDesktopLayout(layout) {
+        this._layout = layout;
+        const icon = this._viewButtons.find(candidate => candidate.dataset.view === 'desktop')?.querySelector('.toolbar__view-icon');
+        if (icon) icon.innerHTML = layoutIcon(layout);
+    }
+
+    /**
+     * @param {HTMLElement} button the Desktop button
+     */
+    _showLayoutMenu(button) {
+        const { left, bottom } = button.getBoundingClientRect();
+        const actions = LAYOUTS.map(layout => ({
+            label: `Inspector on the ${layout.side}, ${layout.count} camera view${layout.count > 1 ? 's' : ''}`,
+            svg: layoutIcon(layout),
+            isActive: () => this._layout?.side === layout.side && this._layout?.count === layout.count,
+            run: () => this._handlers.onSelectLayout(layout),
+        }));
+        this._cameraMenu.show(left, bottom + 2, actions, { isDisabled: () => false, run: action => action.run(), columns: 4 });
+    }
+
+    /**
+     * @param {HTMLElement} button the Model button
+     */
+    _showCameraMenu(button) {
+        const { left, bottom } = button.getBoundingClientRect();
+        const actions = this._handlers.cameras().map(camera => ({
+            label: camera.label,
+            title: camera.description ? `${camera.label} (${camera.description})` : camera.label,
+            icon: camera.active ? 'check' : 'device-camera',
+            run: () => this._handlers.onSelectCamera(camera.id),
+        }));
+        this._cameraMenu.show(left, bottom + 2, actions, { isDisabled: () => false, run: action => action.run() });
     }
 
     /**

@@ -296,6 +296,39 @@ export class ModelEdits {
     }
 
     /**
+     * A new camera of a type the tree offers, in the scene but not in the model (a virtual camera
+     * of the views; `addCamera` puts it into the file).
+     * @param {string} type ArcRotate camera / Universal camera
+     * @param {string} name
+     * @returns {BABYLON.Camera}
+     */
+    newCamera(type, name) {
+        return /** @type {BABYLON.Camera} */ (this._create('Cameras', type, name));
+    }
+
+    /**
+     * Adds a camera to the model (the file) with a new id, as one undoable change.
+     * @param {any} json the camera in the `.babylon` format
+     * @returns {string} its id in the model
+     */
+    addCamera(json) {
+        const value = { ...json, id: newId() };
+        delete value.uniqueId;
+        delete value.parentId;
+        const label = `Add ${json.name ?? 'the camera'} to the file`;
+        if (this._binding()) {
+            this._postOps(label, [{ op: 'insert', arrayPath: ['cameras'], value }]);
+            return value.id;
+        }
+        const camera = BABYLON.Camera.Parse(value, this._scene);
+        // Parsed cameras are already in the scene; the command adds it to the model
+        this._detach(camera);
+        this._markChanged(camera, 'added');
+        this._structural(label, () => this._attach(camera), () => this._detach(camera));
+        return value.id;
+    }
+
+    /**
      * Puts a new image into a texture. In a `.babylon` text the image is embedded: every texture
      * object of the document the texture was loaded from gets it as `base64String` (which the
      * format reads before `name`), an external image file is not changed; the model is reloaded

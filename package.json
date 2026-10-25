@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -204,7 +204,7 @@
         },
         {
           "command": "babylon-editor.tree.rename",
-          "when": "view == babylon-editor.modelTree && viewItem =~ /^item:(node|material|skeleton|clip|camera|light)$/",
+          "when": "view == babylon-editor.modelTree && viewItem =~ /^item:(node|material|skeleton|clip|camera|virtualCamera|light)$/",
           "group": "1_edit@1"
         },
         {
