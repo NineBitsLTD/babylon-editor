@@ -46,7 +46,11 @@ import { texturePreview } from './TextureImage';
  *   user for a text (null when cancelled)
  * @property {((mesh: BABYLON.Mesh) => void) | null} weldVertices welds the vertices at one position
  *   of a mesh into one with smooth normals (null when the format cannot be edited)
- * @property {((bone: BABYLON.Bone) => void) | null} deleteBone deletes a bone with its weights and
+ * @property {((mesh: BABYLON.Mesh, vertices: number[]) => void) | null} deleteVertices deletes vertices of a
+ *   mesh and the triangles that use them (null when the format cannot be edited)
+ * @property {((mesh: BABYLON.Mesh, vertices: number[]) => void) | null} mergeVertices merges vertices of a
+ *   mesh into one at their centre
+ * @property {((bones: BABYLON.Bone[]) => void) | null} deleteBones deletes bones with their weights and
  *   node (null when the model has no `.babylon` text)
  */
 
@@ -813,7 +817,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _vertices(mesh, { highlighter, binding }) {
+    static _vertices(mesh, { highlighter, binding, deleteVertices, mergeVertices }) {
         const K = BABYLON.VertexBuffer;
         /** @type {import('./DataTable').TableColumn[]} */
         const columns = [{ label: '#', leading: true, width: 56, get: row => row }];
@@ -853,6 +857,24 @@ export class ModelProperties {
                 groups,
                 rowCount: () => mesh.getTotalVertices(),
                 onSelectRow: row => highlighter.showVertex(mesh, row),
+                // Shift+click selects several vertices: all are marked
+                onSelectRows: rows => highlighter.showVertices(mesh, rows),
+                // A vertex picked in the 3D view ({ vertex })
+                rowOf: object => (Number.isInteger(object?.vertex) ? object.vertex : -1),
+                rowMenu: (row, rows) => [{
+                    label: rows.length > 1 ? `Delete ${rows.length} vertices` : 'Delete vertex',
+                    title: 'Delete the selected vertices and the triangles that use them (one undo step)',
+                    icon: 'trash',
+                    isDisabled: () => !deleteVertices || rows.length >= mesh.getTotalVertices(),
+                    run: () => deleteVertices?.(mesh, rows),
+                }, {
+                    label: `Merge ${rows.length} vertices`,
+                    title: 'Merge the selected vertices into one at their centre (triangles that become degenerate are dropped; one undo step)',
+                    icon: 'merge',
+                    isHidden: () => rows.length < 2,
+                    isDisabled: () => !mergeVertices,
+                    run: () => mergeVertices?.(mesh, rows),
+                }],
             },
         };
     }
@@ -1083,7 +1105,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber, promptText, deleteBone }) {
+    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber, promptText, deleteBones }) {
         const bones = skeleton.bones;
         const groups = ['position', 'rotation', 'scaling'];
         /** @type {'rest' | 'bind'} set by the Rest | Bind switch of the panel */
@@ -1225,9 +1247,34 @@ export class ModelProperties {
                     isActive: row => highlighter.isBoneHidden(bones[row]),
                     run: row => highlighter.setBoneHidden(bones[row], !highlighter.isBoneHidden(bones[row])),
                 },
+                // Bones moved in the 3D view (edit mode) change the pose the switch shows
+                poseEdit: {
+                    objectOf: row => bones[row] ?? null,
+                    begin: () => showPose(skeleton, pose),
+                    setLocal: (row, local) => {
+                        if (pose === 'rest') {
+                            bones[row].setRestMatrix(local.clone());
+                        } else {
+                            animations.setBindMatrix(bones[row], local, moveChildren);
+                        }
+                        showPose(skeleton, pose);
+                    },
+                    capture: rows => (pose === 'rest'
+                        ? { pose: 'rest', rows, matrices: rows.map(row => bones[row].getRestMatrix().clone()) }
+                        : { pose: 'bind', matrices: animations.captureBind(skeleton) }),
+                    restore: (state) => {
+                        if (state.pose === 'rest') state.rows.forEach((row, index) => bones[row].setRestMatrix(state.matrices[index].clone()));
+                        else animations.restoreBind(skeleton, state.matrices);
+                        showPose(skeleton, state.pose);
+                    },
+                },
                 // Right click on a bone: its commands
-                rowMenu: row => ModelProperties._boneMenu(bones[row], { history, highlighter, promptText, deleteBone }),
+                rowMenu: (row, rows) => (rows.length > 1
+                    ? ModelProperties._bonesMenu(rows.map(index => bones[index]), { highlighter, deleteBones })
+                    : ModelProperties._boneMenu(bones[row], { history, highlighter, promptText, deleteBones })),
                 onSelectRow: row => highlighter.selectBone(bones[row] ?? null),
+                // Shift+click selects several bones: all are highlighted
+                onSelectRows: rows => highlighter.selectBones(rows.map(index => bones[index])),
                 rowOf: object => bones.indexOf(object),
             },
         };
@@ -1236,10 +1283,10 @@ export class ModelProperties {
     /**
      * The commands of a bone of the bone table (its context menu).
      * @param {BABYLON.Bone} bone
-     * @param {Pick<PropertiesContext, 'history' | 'highlighter' | 'promptText' | 'deleteBone'>} context
+     * @param {Pick<PropertiesContext, 'history' | 'highlighter' | 'promptText' | 'deleteBones'>} context
      * @returns {import('./PropertyPanel').PanelAction[]}
      */
-    static _boneMenu(bone, { history, highlighter, promptText, deleteBone }) {
+    static _boneMenu(bone, { history, highlighter, promptText, deleteBones }) {
         if (!bone) return [];
         const hidden = highlighter.isBoneHidden(bone);
         return [{
@@ -1266,8 +1313,31 @@ export class ModelProperties {
             label: 'Delete bone',
             title: 'Delete the bone: its child bones and nodes hang from its parent, its weights go to its parent, its animations are removed (one undo step)',
             icon: 'trash',
-            isDisabled: () => !deleteBone || bone.getSkeleton().bones.length < 2,
-            run: () => deleteBone?.(bone),
+            isDisabled: () => !deleteBones || bone.getSkeleton().bones.length < 2,
+            run: () => deleteBones?.([bone]),
+        }];
+    }
+
+    /**
+     * The commands of several bones of the bone table (Shift+click selected them).
+     * @param {BABYLON.Bone[]} bones
+     * @param {Pick<PropertiesContext, 'highlighter' | 'deleteBones'>} context
+     * @returns {import('./PropertyPanel').PanelAction[]}
+     */
+    static _bonesMenu(bones, { highlighter, deleteBones }) {
+        const allHidden = bones.every(bone => highlighter.isBoneHidden(bone));
+        return [{
+            label: allHidden ? `Show ${bones.length} bones in the 3D view` : `Hide ${bones.length} bones in the 3D view`,
+            title: 'Show or hide the selected bones in the 3D view (the file is not changed)',
+            icon: allHidden ? 'eye' : 'eye-closed',
+            transient: true,
+            run: () => bones.forEach(bone => highlighter.setBoneHidden(bone, !allHidden)),
+        }, {
+            label: `Delete ${bones.length} bones`,
+            title: 'Delete the selected bones: their child bones and nodes hang from the nearest kept bone above, their weights go to it, their animations are removed (one undo step)',
+            icon: 'trash',
+            isDisabled: () => !deleteBones || bones.length >= bones[0].getSkeleton().bones.length,
+            run: () => deleteBones?.(bones),
         }];
     }
 

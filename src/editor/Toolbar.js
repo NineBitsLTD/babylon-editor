@@ -48,6 +48,9 @@ export function layoutIcon({ side, count }) {
  * @property {() => void} onToggleBones shows/hides the bones in skeleton mode
  * @property {(view: EditorView) => void} onSelectView shows the model, the inspector or both
  * @property {(mode: RenderMode) => void} onSelectRenderMode shows the model with textures, without them or as lines
+ * @property {(mode: CursorMode) => void} onSelectCursor what the left button does in the 3D view
+ * @property {(tool: import('./TransformEditing').TransformTool) => void} onSelectTool the tool of the edit mode
+ * @property {() => void} onToggleLocal the gizmo takes the local axes / the world axes
  * @property {(overlay: ViewOverlay) => void} onToggleOverlay shows / hides something over the model in the selected view
  * @property {(tag: PlayerTag) => void} onOpenTag a tag of the player was clicked: show its object
  * @property {() => ViewCamera[]} cameras the cameras the model view can be shown with (read when the
@@ -59,6 +62,8 @@ export function layoutIcon({ side, count }) {
 /** @typedef {'mesh' | 'skeleton' | 'clip'} PlayerTag */
 
 /** @typedef {'textured' | 'solid' | 'wireframe'} RenderMode */
+
+/** @typedef {'view' | 'select' | 'edit'} CursorMode the left button turns the camera / selects / selects and edits */
 
 /** @typedef {'vertices' | 'normals' | 'boneAxes'} ViewOverlay what a view can show over the model */
 
@@ -91,6 +96,11 @@ export class Toolbar {
         this._animationGroup = root.querySelector('.player__animation');
         this._orbitButton = root.querySelector('.player__orbit');
         this._resetButton = root.querySelector('.player__reset');
+        /** @type {HTMLButtonElement[]} */
+        this._cursorButtons = [...root.querySelectorAll('.player__cursor')];
+        /** @type {HTMLButtonElement[]} */
+        this._toolButtons = [...root.querySelectorAll('.player__tool')];
+        this._localButton = root.querySelector('.player__local');
         this._playButton = root.querySelector('.player__play');
         /** @type {HTMLInputElement} */
         this._slider = root.querySelector('.player__slider');
@@ -118,6 +128,9 @@ export class Toolbar {
     _bindEvents() {
         this._orbitButton.addEventListener('click', () => this._handlers.onToggleOrbit());
         this._resetButton.addEventListener('click', () => this._handlers.onResetView());
+        this._cursorButtons.forEach(button => button.addEventListener('click', () => this._handlers.onSelectCursor(/** @type {CursorMode} */ (button.dataset.cursor))));
+        this._toolButtons.forEach(button => button.addEventListener('click', () => this._handlers.onSelectTool(/** @type {any} */ (button.dataset.tool))));
+        this._localButton.addEventListener('click', () => this._handlers.onToggleLocal());
         this._playButton.addEventListener('click', () => this._handlers.onTogglePlay());
         this._meshButton.addEventListener('click', () => this._handlers.onToggleMesh());
         this._bonesButton.addEventListener('click', () => this._handlers.onToggleBones());
@@ -260,6 +273,24 @@ export class Toolbar {
      */
     setRenderMode(mode) {
         this._modeButtons.forEach(button => button.classList.toggle('player__button--active', button.dataset.mode === mode));
+    }
+
+    /**
+     * @param {CursorMode} mode
+     * @param {import('./TransformEditing').TransformTool} tool shown in the edit mode
+     * @param {boolean} local the gizmo takes the local axes
+     */
+    setCursor(mode, tool, local) {
+        this._localButton.hidden = mode !== 'edit';
+        this._localButton.classList.toggle('player__button--active', local);
+        this._localButton.title = local
+            ? 'Local axes (X): the gizmo takes the axes of the first selected bone, or of the mesh — click for the world axes'
+            : 'World axes (X): click for the local axes of the first selected bone, or of the mesh';
+        this._cursorButtons.forEach(button => button.classList.toggle('player__button--active', button.dataset.cursor === mode));
+        this._toolButtons.forEach((button) => {
+            button.classList.toggle('player__button--active', button.dataset.tool === tool);
+            button.hidden = mode !== 'edit';
+        });
     }
 
     /**

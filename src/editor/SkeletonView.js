@@ -6,8 +6,9 @@ export const MODEL_LAYER = 0x0FFFFFFF;
 /** Layer of the bones: a view shows them when its camera's mask has it. */
 export const BONES_LAYER = 0x10000000;
 
-const BONE_COLOR = BABYLON.Color4.FromHexString('#ff9f1cff');
-const SELECTED_COLOR = BABYLON.Color4.FromHexString('#4fc1ffff');
+/** Bones are yellow and see-through, so the axes of a bone (ViewRendering) show inside them. */
+const BONE_COLOR = BABYLON.Color4.FromHexString('#ffd60a73');
+const SELECTED_COLOR = BABYLON.Color4.FromHexString('#4fc1ff8c');
 /** Base half-width of a pyramid relative to its length. */
 const WIDTH_RATIO = 0.1;
 /** Length of a leaf bone relative to the bone it continues. */
@@ -101,8 +102,10 @@ export class SkeletonView {
         // .babylon bones are relative to the skinned mesh; glTF bones follow linked transform nodes
         this._mesh = scene.meshes.find(candidate => candidate.skeleton === skeleton) ?? null;
         this._segments = buildSegments(skeleton);
-        /** @type {BABYLON.Bone | null} */
+        /** @type {BABYLON.Bone | null} the bone selected last */
         this._selected = null;
+        /** @type {Set<BABYLON.Bone>} the highlighted bones (several when selected with Shift) */
+        this._highlighted = new Set();
         this._heads = skeleton.bones.map(() => new BABYLON.Vector3());
         this._positions = new Float32Array(this._segments.length * VERTICES_PER_BONE * 3);
         this._normals = new Float32Array(this._positions.length);
@@ -120,7 +123,28 @@ export class SkeletonView {
         this._selected = target instanceof BABYLON.Bone
             ? target
             : this._skeleton.bones.find(bone => target && bone.getTransformNode() === target) ?? null;
+        this._highlighted = new Set(this._selected ? [this._selected] : []);
         this._updateColors();
+    }
+
+    /**
+     * Highlights several bones (the last one is the selected one).
+     * @param {BABYLON.Bone[]} bones
+     */
+    setHighlighted(bones) {
+        this._highlighted = new Set(bones.filter(bone => this._skeleton.bones.includes(bone)));
+        this._selected = [...this._highlighted].pop() ?? null;
+        this._updateColors();
+    }
+
+    /** @returns {BABYLON.Skeleton} */
+    get skeleton() {
+        return this._skeleton;
+    }
+
+    /** @returns {BABYLON.Bone[]} the highlighted bones */
+    get highlighted() {
+        return [...this._highlighted];
     }
 
     /** @returns {BABYLON.Bone | null} the highlighted bone */
@@ -170,7 +194,10 @@ export class SkeletonView {
         material.specularColor = BABYLON.Color3.Black();
         material.backFaceCulling = false;
         material.twoSidedLighting = true;
+        // Blended with the alpha of the vertex colors; the pyramids do not hide each other
+        material.disableDepthWrite = true;
         mesh.material = material;
+        mesh.hasVertexAlpha = true;
         mesh.isPickable = false;
         // Each view shows or hides the bones through the layer mask of its camera
         mesh.layerMask = BONES_LAYER;
@@ -187,7 +214,7 @@ export class SkeletonView {
     _updateColors(mesh = this._helper) {
         const colors = new Float32Array(this._indices.length * 4);
         this._segments.forEach((segment, index) => {
-            const color = this._skeleton.bones[segment.from] === this._selected ? SELECTED_COLOR : BONE_COLOR;
+            const color = this._highlighted.has(this._skeleton.bones[segment.from]) ? SELECTED_COLOR : BONE_COLOR;
             for (let vertex = 0; vertex < VERTICES_PER_BONE; vertex++) {
                 color.toArray(colors, (index * VERTICES_PER_BONE + vertex) * 4);
             }

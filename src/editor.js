@@ -4,6 +4,7 @@ import * as fflate from 'fflate';
 import { AnimationController } from './editor/AnimationController';
 import { BabylonJsonBinding } from './editor/BabylonJsonBinding';
 import { CameraController } from './editor/CameraController';
+import { BoxSelection, selectionMode } from './editor/BoxSelection';
 import { CameraViews } from './editor/CameraViews';
 import { ClipFrameEditor } from './editor/ClipFrameEditor';
 import { DocumentEditHistory, EditHistory } from './editor/EditHistory';
@@ -13,6 +14,7 @@ import { ModelConverter } from './editor/ModelConverter';
 import { ModelEdits, objectOf } from './editor/ModelEdits';
 import { clipIcon, ModelOutline } from './editor/ModelOutline';
 import { ModelTreeBridge } from './editor/ModelTreeBridge';
+import { ScreenSelection } from './editor/ScreenSelection';
 import { PanelResizer } from './editor/PanelResizer';
 import { PopupMenu } from './editor/PopupMenu';
 import { ModelProperties } from './editor/ModelProperties';
@@ -20,6 +22,7 @@ import { ModelSerializer } from './editor/ModelSerializer';
 import { PropertyPanel } from './editor/PropertyPanel';
 import { SelectionHighlighter } from './editor/SelectionHighlighter';
 import { TextureImage } from './editor/TextureImage';
+import { TransformEditing } from './editor/TransformEditing';
 import { ViewRendering } from './editor/ViewRendering';
 import { Toolbar } from './editor/Toolbar';
 
@@ -184,6 +187,18 @@ class Editor {
         this._layout = viewSettings().layout ?? { side: 'right', count: 1 };
         this._cameraMenu = new PopupMenu();
         this._viewRendering = new ViewRendering(this._scene);
+        // The selection mode: the left button selects vertices / bones in a rectangle (kept in the webview state)
+        this._boxSelection = new BoxSelection(root.querySelector('.viewport'), root.querySelector('.canvas'), (rect, mode) => this._selectInRect(rect, mode), () => !this._transform?.isHovered);
+        // The edit mode: the gizmo moves, turns or scales the selected bones or vertices
+        this._transform = new TransformEditing(this._scene, {
+            selection: () => this._editSelection(),
+            record: (label, capture, apply, restore) => {
+                if (this._selection) this._markChanged(objectOf(this._selection.data), 'modified');
+                this._history.executeMutation(label, capture, apply, restore);
+            },
+            meshOfBones: () => this._container?.meshes.find(mesh => mesh.skeleton && mesh.skeleton === this._highlighter.shownSkeleton) ?? null,
+        });
+        this._listenCursorKeys();
         // One to four views of the model, each with its camera (kept in the webview state)
         this._cameraViews = new CameraViews({
             scene: this._scene,
@@ -218,6 +233,9 @@ class Editor {
         this._shown = null;
         new ResizeObserver(() => this._updateLayout()).observe(root.querySelector('.workspace'));
         this._syncViewBar();
+        this._localAxes = !!vscode.getState()?.localAxes;
+        this._transform.setLocal(this._localAxes);
+        this._setCursor(vscode.getState()?.cursor ?? 'view', vscode.getState()?.tool ?? 'move');
         this._edits = new ModelEdits({
             scene: this._scene,
             container: () => this._container,
@@ -503,15 +521,143 @@ class Editor {
         this._cameraMenu.show(Math.max(0, left), bottom + 2, actions, { isDisabled: () => false, run: action => action.run() });
     }
 
-    /** A click (not a camera drag) on a bone in the 3D view selects it; a click on the selected bone deselects it. */
+    /**
+     * Runs an edit and shows its report (or its error) as a message of VS Code.
+     * @param {() => string} edit
+     */
+    _report(edit) {
+        try {
+            this._host.send('showMessage', { level: 'info', text: edit() });
+        } catch (error) {
+            this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });
+        }
+    }
+
+    /**
+     * A click (not a camera drag) in the 3D view: on a bone selects it (a click on the selected bone
+     * deselects it), else, while the inspector shows a mesh, on a vertex of it selects that vertex in
+     * its vertex table. Shift+click adds the bone / vertex to the selection of the table or takes it out.
+     */
     _listenBonePicks() {
         this._scene.onPointerObservable.add((info) => {
             // A quick second click is reported as a double tap; it toggles the selection too
             const { POINTERTAP, POINTERDOUBLETAP } = BABYLON.PointerEventTypes;
             if (info.type !== POINTERTAP && info.type !== POINTERDOUBLETAP) return;
-            const bone = this._highlighter.pickBone(this._scene.pointerX, this._scene.pointerY);
-            if (bone) this._revealBone(bone);
+            // A click on the gizmo is not a selection
+            if (this._transform.isHovered) return;
+            // Shift adds to the selection (or takes out a selected one), Option / Alt takes out
+            const mode = selectionMode(info.event ?? {});
+            const { pointerX: x, pointerY: y } = this._scene;
+            const bone = this._highlighter.pickBone(x, y);
+            if (bone) {
+                if (mode === 'remove') {
+                    this._panel.selectObjects([bone], 'remove');
+                    return;
+                }
+                if (mode === 'add' && this._panel.revealObject(bone, true)) return;
+                this._revealBone(bone);
+                return;
+            }
+            const mesh = this._selectedMesh();
+            if (!mesh) return;
+            const vertex = this._highlighter.pickVertex(mesh, x, y);
+            if (vertex < 0) return;
+            if (mode === 'remove') this._panel.selectObjects([{ vertex }], 'remove');
+            else this._panel.revealObject({ vertex }, mode === 'add');
         });
+    }
+
+    /** @returns {BABYLON.Mesh | null} the mesh the inspector shows (its vertex table) */
+    _selectedMesh() {
+        const node = this._selection?.data.kind === 'node' ? this._selection.data.node : null;
+        return node instanceof BABYLON.Mesh && node.getTotalVertices() > 0 ? node : null;
+    }
+
+    /**
+     * What the left button does in the 3D view: turns the camera (view), selects (select) or selects
+     * and moves the selection with the gizmo of the tool (edit); the camera turns with the middle
+     * button but in the view mode. Kept in the webview state.
+     * @param {import('./editor/Toolbar').CursorMode} mode
+     * @param {import('./editor/TransformEditing').TransformTool} tool
+     */
+    _setCursor(mode, tool) {
+        this._cursor = mode;
+        this._tool = tool;
+        const selecting = mode !== 'view';
+        this._boxSelection.enabled = selecting;
+        this._cameraViews.setSelectMode(selecting);
+        this._transform.setTool(mode === 'edit' ? tool : null);
+        this._toolbar.setCursor(mode, tool, this._localAxes);
+        vscode.setState({ ...vscode.getState(), cursor: mode, tool });
+    }
+
+    /**
+     * @param {boolean} local the gizmo takes the axes of the first selected bone (or of the mesh)
+     */
+    _setLocalAxes(local) {
+        this._localAxes = local;
+        this._transform.setLocal(local);
+        this._toolbar.setCursor(this._cursor, this._tool, local);
+        vscode.setState({ ...vscode.getState(), localAxes: local });
+    }
+
+    /** V: view, Q: select, W / E / R: move / rotate / scale in the edit mode, X: local / world axes (not while typing). */
+    _listenCursorKeys() {
+        window.addEventListener('keydown', (event) => {
+            if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
+            const target = /** @type {HTMLElement} */ (event.target);
+            if (target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+            const keys = { v: ['view', this._tool], q: ['select', this._tool], w: ['edit', 'move'], e: ['edit', 'rotate'], r: ['edit', 'scale'] };
+            if (event.key.toLowerCase() === 'x' && this._cursor === 'edit') {
+                this._setLocalAxes(!this._localAxes);
+                event.preventDefault();
+                return;
+            }
+            const choice = keys[event.key.toLowerCase()];
+            if (!choice) return;
+            this._setCursor(choice[0], choice[1]);
+            event.preventDefault();
+        });
+    }
+
+    /**
+     * What the gizmo moves in the edit mode: the selected bones of the bone table (skeleton or clip
+     * inspector) while the view shows the bones, else the selected vertices of the mesh shown.
+     * @returns {import('./editor/TransformEditing').EditSelection}
+     */
+    _editSelection() {
+        if (this._cursor !== 'edit') return null;
+        const table = this._panel.table;
+        const rows = this._panel.selectedRows;
+        if (table?.poseEdit && this._highlighter.shownSkeleton && this._selectedViewSettings().display.bones) {
+            return { kind: 'bones', rows, pose: table.poseEdit };
+        }
+        const mesh = this._selectedMesh();
+        return mesh ? { kind: 'vertices', mesh, rows } : null;
+    }
+
+    /**
+     * Selects what a rectangle of the view holds: the bones of the shown skeleton (their joints)
+     * while the inspector has a bone table, else the vertices of the mesh the inspector shows —
+     * those no polygon hides, unless the view shows lines.
+     * @param {import('./editor/ScreenSelection').ScreenRect} rect
+     * @param {import('./editor/BoxSelection').SelectionMode} mode
+     */
+    _selectInRect(rect, mode) {
+        const settings = this._selectedViewSettings();
+        const skeleton = this._highlighter.shownSkeleton;
+        const showsBones = !!skeleton && settings.display.bones;
+        if (showsBones) {
+            const mesh = this._container?.meshes.find(candidate => candidate.skeleton === skeleton) ?? null;
+            const bones = ScreenSelection.bonesInRect(this._scene, skeleton, mesh, rect).filter(bone => !this._highlighter.isBoneHidden(bone));
+            if (this._panel.selectObjects(bones, mode)) return;
+        }
+        const mesh = this._selectedMesh();
+        if (!mesh) return;
+        const occluders = settings.renderMode === 'wireframe' ? null
+            : (this._container?.meshes ?? []).filter(candidate => candidate.isEnabled() && candidate.isVisible && candidate.layerMask !== 0 && candidate.getTotalVertices() > 0);
+        const vertices = ScreenSelection.verticesInRect(this._scene, mesh, rect, occluders);
+        this._panel.selectObjects(vertices.map(vertex => ({ vertex })), mode);
     }
 
     /**
@@ -572,6 +718,9 @@ class Editor {
                 saveViewSettings({ view, singleView: this._singleView });
                 this._updateLayout();
             },
+            onSelectCursor: mode => this._setCursor(mode, this._tool),
+            onSelectTool: tool => this._setCursor('edit', tool),
+            onToggleLocal: () => this._setLocalAxes(!this._localAxes),
             onResetView: () => {
                 // The camera of the view with the mouse: the preview camera goes to its framed position
                 const entry = this._cameraViews.resetSelected();
@@ -944,9 +1093,11 @@ class Editor {
                     this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });
                 }
             } : null,
-            deleteBone: this._binding && this._canEdit ? (bone) => {
+            deleteVertices: this._canEdit ? (mesh, vertices) => this._report(() => this._edits.deleteVertices(mesh, vertices)) : null,
+            mergeVertices: this._canEdit ? (mesh, vertices) => this._report(() => this._edits.mergeVertices(mesh, vertices)) : null,
+            deleteBones: this._binding && this._canEdit ? (bones) => {
                 try {
-                    const report = this._edits.deleteBone(bone);
+                    const report = this._edits.deleteBones(bones);
                     this._host.send('showMessage', { level: 'info', text: report });
                 } catch (error) {
                     this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });

@@ -89,6 +89,8 @@ const COLLAPSED_BY_DEFAULT = new Set(['Other file fields']);
  * @property {PanelList[]} [lists] accordion groups shown after the main properties (e.g. the nodes and parts of a mesh)
  * @property {import('./DataTable').TableData & {
  *   onSelectRow?: (row: number) => void,
+ *   onSelectRows?: (rows: number[]) => void,
+ *   poseEdit?: import('./TransformEditing').PoseEdit,
  *   rowOf?: (object: any) => number,
  *   title?: string,
  *   notice?: string | (() => string),
@@ -521,6 +523,7 @@ export class PropertyPanel {
     _showView() {
         const content = this._content;
         const selectedRow = this._table?.selectedRow ?? -1;
+        const selectedRows = this._table?.rows ?? [];
         const element = document.createElement('div');
         element.className = 'inspector__view';
         this._viewElement.replaceChildren(element);
@@ -539,7 +542,7 @@ export class PropertyPanel {
             this._table.setReadOnly(this._readOnly);
             this._table.setData(content.curves);
         } else {
-            this._table = new DataTable(element, { onSelectRow, onCellCommit: this._handlers.onCellCommit });
+            this._table = new DataTable(element, { onSelectRow, onSelectRows: rows => content.table.onSelectRows?.(rows), onCellCommit: this._handlers.onCellCommit });
             this._table.setReadOnly(this._readOnly);
             this._table.setData(content.table);
         }
@@ -547,6 +550,7 @@ export class PropertyPanel {
         // The selected record survives switching the view
         if (selectedRow >= 0) {
             this._table.selectedRow = selectedRow;
+            if (this._table instanceof DataTable) this._table.setSelection(selectedRows.length ? selectedRows : [selectedRow], selectedRow);
             this._table.refresh();
         }
     }
@@ -611,14 +615,49 @@ export class PropertyPanel {
     /**
      * Selects the record of a model object in the table / graph and scrolls to it.
      * @param {any} object
+     * @param {boolean} [add] adds the record to the selection (or takes it out) instead
      * @returns {boolean} whether the shown content has a record for it
      */
-    revealObject(object) {
+    revealObject(object, add = false) {
         const row = this._content?.table?.rowOf?.(object) ?? -1;
         if (row < 0 || !this._table) return false;
-        if (this._table.selectedRow !== row) this._table.selectRow(row);
+        // Shift+click in the 3D view adds the record to the selection or takes it out
+        if (add && this._table instanceof DataTable) this._table.toggleRow(row);
+        else if (this._table.selectedRow !== row) this._table.selectRow(row);
         this._table.scrollToRow(row);
         return true;
+    }
+
+    /**
+     * Changes the selection of the table by model objects (picked in the 3D view): replaces it, adds
+     * them or takes them out; objects without a record are left out.
+     * @param {any[]} objects
+     * @param {'replace' | 'add' | 'remove'} mode
+     * @returns {boolean} whether the shown content has records for model objects
+     */
+    selectObjects(objects, mode) {
+        const rowOf = this._content?.table?.rowOf;
+        if (!rowOf || !this._table) return false;
+        const rows = objects.map(object => rowOf(object)).filter(row => row >= 0);
+        if (this._table instanceof DataTable) {
+            this._table.applySelection(rows, mode);
+        } else if (mode !== 'remove' && rows.length) {
+            this._table.selectRow(rows[rows.length - 1]);
+        }
+        if (rows.length && mode !== 'remove') this._table.scrollToRow(rows[rows.length - 1]);
+        this.refreshActions();
+        return true;
+    }
+
+    /** @returns {PanelContent['table'] | null} the table of the shown content */
+    get table() {
+        return this._content?.table ?? null;
+    }
+
+    /** @returns {number[]} the selected records of the table (one in the graph view) */
+    get selectedRows() {
+        if (this._table instanceof DataTable) return this._table.rows;
+        return this.selectedRow >= 0 ? [this.selectedRow] : [];
     }
 
     /** Moves the current frame markers of the graph (called every frame while a clip plays). */

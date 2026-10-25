@@ -210,6 +210,30 @@ function writeTransform(channels, frame, component, value) {
 }
 
 /**
+ * Sets the whole local transform of a target at a frame (a bone moved in the 3D view), creating
+ * keys where needed; only the channels the clip animates take it.
+ * @param {TransformChannels} channels
+ * @param {number} frame
+ * @param {BABYLON.Matrix} local
+ */
+function writeLocal(channels, frame, local) {
+    if (channels.matrix) {
+        ensureKey(channels.matrix, frame).value = local.clone();
+        channels.matrix.setKeys(channels.matrix.getKeys(), true);
+        return;
+    }
+    const scaling = new BABYLON.Vector3(), rotation = new BABYLON.Quaternion(), position = new BABYLON.Vector3();
+    local.decompose(scaling, rotation, position);
+    if (channels.position) ensureKey(channels.position, frame).value = position;
+    if (channels.scaling) ensureKey(channels.scaling, frame).value = scaling;
+    if (channels.rotation) {
+        const isQuaternion = channels.rotation.dataType === BABYLON.Animation.ANIMATIONTYPE_QUATERNION;
+        ensureKey(channels.rotation, frame).value = isQuaternion ? rotation : rotation.toEulerAngles();
+    }
+    [channels.position, channels.rotation, channels.scaling].filter(Boolean).forEach(animation => animation.setKeys(animation.getKeys(), true));
+}
+
+/**
  * @param {TransformChannels} channels
  * @returns {{ animation: BABYLON.Animation, keys: BABYLON.IAnimationKey[] }[]}
  */
@@ -480,6 +504,24 @@ export class ClipFrameEditor {
                 notice: 'Bone values at the selected frame. ◆ marks a key at this frame; editing a value where there is no key creates one.',
                 rowCount: () => rows.length,
                 onSelectRow: row => highlighter.selectBone(rows[row]?.target ?? null),
+                // Shift+click selects several: all their bones are highlighted
+                onSelectRows: selected => highlighter.selectBones(selected.map(row => rows[row]?.target)
+                    .map(target => (target instanceof BABYLON.Bone ? target : highlighter.shownSkeleton?.bones.find(bone => bone.getTransformNode() === target)))
+                    .filter(Boolean)),
+                // Bones moved in the 3D view (edit mode) get keys at the shown frame
+                poseEdit: {
+                    objectOf: row => rows[row]?.target ?? null,
+                    begin: () => {
+                        if (animations.isPlaying) pauseAnimation();
+                        showFrame(clip, frame());
+                    },
+                    setLocal: (row, local) => {
+                        writeLocal(rows[row], frame(), local);
+                        showFrame(clip, frame());
+                    },
+                    capture: selected => selected.flatMap(row => captureKeys(rows[row])),
+                    restore: snapshot => restore(snapshot),
+                },
                 // glTF clips animate the transform node linked to the bone
                 rowOf: object => rows.findIndex(({ target }) => target === object
                     || (object instanceof BABYLON.Bone && target === object.getTransformNode())),

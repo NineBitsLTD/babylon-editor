@@ -197,6 +197,109 @@ export class MeshWeld {
     }
 
     /**
+     * Removes vertices and the triangles that use them; the other vertices keep all their data.
+     * @param {BABYLON.Mesh} mesh
+     * @param {number[]} vertices
+     * @returns {WeldedMesh}
+     */
+    static removeVertices(mesh, vertices) {
+        const removed = new Set(vertices);
+        const count = mesh.getTotalVertices();
+        const kept = [];
+        const newIndexOf = new Int32Array(count).fill(-1);
+        for (let vertex = 0; vertex < count; vertex++) {
+            if (removed.has(vertex)) continue;
+            newIndexOf[vertex] = kept.length;
+            kept.push(vertex);
+        }
+        return MeshWeld._rebuild(mesh, kept, newIndexOf, null);
+    }
+
+    /**
+     * Merges vertices into one at their centre (a vertex of the first one, with the average normal;
+     * morph targets move it to the centre of their positions); triangles that become degenerate are dropped.
+     * @param {BABYLON.Mesh} mesh
+     * @param {number[]} vertices at least two
+     * @returns {WeldedMesh}
+     */
+    static mergeVertices(mesh, vertices) {
+        const merged = [...new Set(vertices)].sort((a, b) => a - b);
+        if (merged.length < 2) throw new Error('Choose at least two vertices to merge');
+        const into = merged[0];
+        const others = new Set(merged.slice(1));
+        const count = mesh.getTotalVertices();
+        const kept = [];
+        const newIndexOf = new Int32Array(count);
+        for (let vertex = 0; vertex < count; vertex++) {
+            if (others.has(vertex)) continue;
+            newIndexOf[vertex] = kept.length;
+            kept.push(vertex);
+        }
+        others.forEach((vertex) => { newIndexOf[vertex] = newIndexOf[into]; });
+        return MeshWeld._rebuild(mesh, kept, newIndexOf, { at: newIndexOf[into], vertices: merged });
+    }
+
+    /**
+     * The buffers of a mesh with some vertices only (in the order of `kept`), indices remapped.
+     * @param {BABYLON.Mesh} mesh
+     * @param {number[]} kept the old vertex of every new one
+     * @param {Int32Array} newIndexOf the new vertex of every old one (-1: removed with its triangles)
+     * @param {{ at: number, vertices: number[] } | null} merge a new vertex that is the average of old ones
+     * @returns {WeldedMesh}
+     */
+    static _rebuild(mesh, kept, newIndexOf, merge) {
+        const indices = mesh.getIndices() ?? [];
+        const average = (values, stride) => {
+            const sum = new Float32Array(stride);
+            for (const vertex of merge.vertices) for (let component = 0; component < stride; component++) sum[component] += values[vertex * stride + component];
+            return sum.map(value => value / merge.vertices.length);
+        };
+        const compact = (values, stride, averaged) => {
+            const result = new Float32Array(kept.length * stride);
+            kept.forEach((vertex, index) => result.set(values.subarray(vertex * stride, vertex * stride + stride), index * stride));
+            if (merge && averaged) result.set(averaged(values, stride), merge.at * stride);
+            return result;
+        };
+        const normalized = (values, stride) => {
+            const sum = average(values, stride);
+            const length = Math.hypot(...sum) || 1;
+            return sum.map(value => value / length);
+        };
+        const data = new Map();
+        for (const kind of meshKinds(mesh)) {
+            const values = Float32Array.from(mesh.getVerticesData(kind));
+            const stride = values.length / mesh.getTotalVertices();
+            // The merged vertex: at the centre, with the average normal; its other values from the first vertex
+            const averaged = kind === K.PositionKind ? average : kind === K.NormalKind ? normalized : null;
+            data.set(kind, compact(values, stride, averaged));
+        }
+        const newIndices = [];
+        const subMeshes = (mesh.subMeshes?.length ? mesh.subMeshes : [{ materialIndex: 0, indexStart: 0, indexCount: indices.length }]).map((subMesh) => {
+            const indexStart = newIndices.length;
+            for (let corner = subMesh.indexStart; corner < subMesh.indexStart + subMesh.indexCount; corner += 3) {
+                const a = newIndexOf[indices[corner]], b = newIndexOf[indices[corner + 1]], c = newIndexOf[indices[corner + 2]];
+                if (a < 0 || b < 0 || c < 0 || a === b || b === c || a === c) continue;
+                newIndices.push(a, b, c);
+            }
+            return { materialIndex: subMesh.materialIndex, indexStart, indexCount: newIndices.length - indexStart };
+        });
+        const manager = mesh.morphTargetManager;
+        const fields = [...TARGET_FIELDS, { key: 'normals', get: 'getNormals', stride: 3 }, { key: 'tangents', get: 'getTangents', stride: 4 }];
+        const targets = Array.from({ length: manager?.numTargets ?? 0 }, (_, index) => {
+            const target = manager.getTarget(index);
+            const targetData = new Map();
+            for (const field of fields) {
+                const values = target[field.get]();
+                if (!values?.length) continue;
+                const averaged = field.key === 'positions' ? average : field.key === 'normals' ? normalized : null;
+                targetData.set(field.key, compact(Float32Array.from(values), field.stride, averaged));
+            }
+            return { data: targetData, hadTangents: false };
+        });
+        return { data, indices: newIndices, subMeshes, vertexCount: kept.length, removed: mesh.getTotalVertices() - kept.length, targets };
+    }
+
+    /**
      * Groups the vertices into points: at one position (distance 0: the same coordinates), or no
      * farther than the distance from the first vertex of a point (found through a grid of cells of
      * that size and their neighbours).

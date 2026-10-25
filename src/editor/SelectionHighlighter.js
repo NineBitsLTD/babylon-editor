@@ -1,9 +1,14 @@
 import * as BABYLON from '@babylonjs/core';
+import { ScreenSelection } from './ScreenSelection';
 import { SkeletonView } from './SkeletonView';
 
 const OUTLINE_COLOR = BABYLON.Color3.FromHexString('#ff9f1c');
 
 const K = BABYLON.VertexBuffer;
+/** A click picks a vertex drawn this close to the pointer (CSS pixels). */
+const PICK_RADIUS = 10;
+/** Markers shown at most (a selection of many vertices shows the first ones). */
+const MAX_MARKERS = 200;
 
 /**
  * Where a vertex is drawn: its position moved by the bones that influence it (as the skinning
@@ -14,7 +19,7 @@ const K = BABYLON.VertexBuffer;
  * @param {BABYLON.Vector3} result
  * @returns {boolean} whether the mesh has the vertex
  */
-function drawnVertexPosition(mesh, index, result) {
+export function drawnVertexPosition(mesh, index, result) {
     const positions = mesh.getVerticesData(K.PositionKind);
     if (!positions || index < 0 || index * 3 + 2 >= positions.length) return false;
     const local = BABYLON.Vector3.FromArray(positions, index * 3);
@@ -66,8 +71,8 @@ export class SelectionHighlighter {
         this._outlined = [];
         /** @type {SkeletonView | null} */
         this._skeletonView = null;
-        /** @type {BABYLON.Mesh | null} */
-        this._marker = null;
+        /** @type {BABYLON.Mesh[]} markers of the selected vertices */
+        this._markers = [];
         /** @type {SkeletonDisplay} what a new view shows in skeleton mode */
         this.skeletonDisplay = { mesh: true, bones: true };
         /** @type {Set<BABYLON.Bone>} bones not drawn in skeleton mode (view only, kept while switching objects) */
@@ -104,8 +109,8 @@ export class SelectionHighlighter {
         this._outlined = [];
         this._skeletonView?.dispose();
         this._skeletonView = null;
-        this._marker?.dispose();
-        this._marker = null;
+        this._markers.forEach(marker => marker.dispose());
+        this._markers = [];
     }
 
     /**
@@ -168,30 +173,76 @@ export class SelectionHighlighter {
     }
 
     /**
+     * Highlights several bones of the shown skeleton (Shift+click).
+     * @param {BABYLON.Bone[]} bones
+     */
+    selectBones(bones) {
+        this._skeletonView?.setHighlighted(bones);
+    }
+
+    /** @returns {BABYLON.Skeleton | null} the skeleton shown in skeleton mode */
+    get shownSkeleton() {
+        return this._skeletonView?.skeleton ?? null;
+    }
+
+    /** @returns {BABYLON.Bone[]} the highlighted bones of the shown skeleton */
+    get selectedBones() {
+        return this._skeletonView?.highlighted ?? [];
+    }
+
+    /**
+     * The vertex of a mesh drawn nearest to a screen point (within a few pixels; the one nearest the
+     * camera when several are), where the skin draws it.
+     * @param {BABYLON.AbstractMesh} mesh
+     * @param {number} x canvas x
+     * @param {number} y canvas y
+     * @returns {number} the vertex, or -1
+     */
+    pickVertex(mesh, x, y) {
+        return mesh.isEnabled() ? ScreenSelection.nearestVertex(this._scene, mesh, x, y, PICK_RADIUS) : -1;
+    }
+
+    /**
      * Places a marker at a vertex where it is drawn (moved by its bones), following it while the
      * pose changes.
      * @param {BABYLON.AbstractMesh} mesh
      * @param {number} index vertex index
      */
     showVertex(mesh, index) {
-        this._marker?.dispose();
-        const position = new BABYLON.Vector3();
-        if (!drawnVertexPosition(mesh, index, position)) return;
-        const marker = BABYLON.MeshBuilder.CreateSphere('__editorVertexMarker', { diameter: this._sceneRadius() * 0.02, segments: 8 }, this._scene);
+        this.showVertices(mesh, index >= 0 ? [index] : []);
+    }
+
+    /**
+     * Places markers at vertices (the selected ones), at most MAX_MARKERS, following them while the
+     * pose changes.
+     * @param {BABYLON.AbstractMesh} mesh
+     * @param {number[]} indices
+     */
+    showVertices(mesh, indices) {
+        this._markers.forEach(marker => marker.dispose());
+        this._markers = [];
+        const shown = indices.slice(0, MAX_MARKERS);
+        if (!shown.length) return;
+        const diameter = this._sceneRadius() * 0.02;
         const material = new BABYLON.StandardMaterial('__editorVertexMarker', this._scene);
         material.emissiveColor = OUTLINE_COLOR;
         material.disableLighting = true;
-        marker.material = material;
-        marker.isPickable = false;
-        marker.renderingGroupId = 1;
-        marker.position = position;
-        // The skin matrices of the frame are ready after it is drawn
-        const observer = this._scene.onAfterRenderObservable.add(() => drawnVertexPosition(mesh, index, marker.position));
-        marker.onDisposeObservable.add(() => {
-            this._scene.onAfterRenderObservable.remove(observer);
-            material.dispose();
-        });
-        this._marker = marker;
+        for (const index of shown) {
+            const position = new BABYLON.Vector3();
+            if (!drawnVertexPosition(mesh, index, position)) continue;
+            const marker = BABYLON.MeshBuilder.CreateSphere('__editorVertexMarker', { diameter, segments: 8 }, this._scene);
+            marker.material = material;
+            marker.isPickable = false;
+            marker.renderingGroupId = 1;
+            marker.position = position;
+            // The skin matrices of the frame are ready after it is drawn
+            const observer = this._scene.onAfterRenderObservable.add(() => drawnVertexPosition(mesh, index, marker.position));
+            marker.onDisposeObservable.add(() => this._scene.onAfterRenderObservable.remove(observer));
+            this._markers.push(marker);
+        }
+        // The material goes with the markers
+        if (this._markers.length) this._markers[0].onDisposeObservable.add(() => material.dispose());
+        else material.dispose();
     }
 
     _sceneRadius() {

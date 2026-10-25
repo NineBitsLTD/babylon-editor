@@ -147,6 +147,18 @@ h1 {
 	min-width: 0;
 }
 
+.box-selection {
+	position: absolute;
+	z-index: 2;
+	pointer-events: none;
+	border: 1px solid var(--vscode-focusBorder);
+	background-color: color-mix(in srgb, var(--vscode-focusBorder) 15%, transparent);
+
+	&[hidden] {
+		display: none;
+	}
+}
+
 .views {
 	position: absolute;
 	inset: 0;
@@ -256,6 +268,10 @@ h1 {
 			color: var(--vscode-inputOption-activeForeground);
 			border-color: var(--vscode-inputOption-activeBorder);
 			background-color: var(--vscode-inputOption-activeBackground);
+		}
+
+		&[hidden] {
+			display: none;
 		}
 	}
 
@@ -753,8 +769,10 @@ h1 {
 
 		&-group {
 			display: flex;
+			flex-wrap: wrap;
 			align-items: center;
-			gap: 8px;
+			gap: 4px 8px;
+			min-width: 0;
 		}
 
 		&-option {

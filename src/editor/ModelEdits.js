@@ -298,16 +298,17 @@ export class ModelEdits {
     }
 
     /**
-     * Deletes a bone from its skeleton (`BoneRemoval`: its children, the weights of its vertices and
-     * its linked node go to its parent) as one undoable change of the `.babylon` text.
-     * @param {BABYLON.Bone} bone
+     * Deletes bones of one skeleton (`BoneRemoval`: their children, the weights of their vertices and
+     * their linked nodes go to the nearest kept bone above) as one undoable change of the `.babylon` text.
+     * @param {BABYLON.Bone[]} bones
      * @returns {string} what was done
      */
-    deleteBone(bone) {
+    deleteBones(bones) {
         const binding = this._binding();
-        if (!binding) throw new Error('Deleting a bone needs the .babylon text of the model (models too large for it stay in the binary editor)');
-        const { ops, report } = BoneRemoval.ops(bone, { container: this._container(), binding, bones: ModelEdits._copySkeleton(bone.getSkeleton()).bones });
-        this._postOps(`Delete bone ${bone.name}`, ops);
+        if (!binding) throw new Error('Deleting bones needs the .babylon text of the model (models too large for it stay in the binary editor)');
+        if (!bones.length) throw new Error('Choose the bones to delete');
+        const { ops, report } = BoneRemoval.ops(bones, { container: this._container(), binding, bones: ModelEdits._copySkeleton(bones[0].getSkeleton()).bones });
+        this._postOps(bones.length === 1 ? `Delete bone ${bones[0].name}` : `Delete ${bones.length} bones`, ops);
         return report;
     }
 
@@ -321,39 +322,78 @@ export class ModelEdits {
      */
     weldVertices(mesh, distance = 0) {
         const welded = MeshWeld.compute(mesh, { distance });
+        this._applyGeometry(mesh, welded, `Weld ${mesh.name}`);
+        return `Welded ${mesh.name}${distance > 0 ? ` (points within ${distance})` : ''}: ${welded.vertexCount} vertices (${welded.removed} merged), smooth normals`;
+    }
+
+    /**
+     * Deletes vertices of a mesh and the triangles that use them (`MeshWeld.removeVertices`).
+     * @param {BABYLON.Mesh} mesh
+     * @param {number[]} vertices
+     * @returns {string} what was done
+     */
+    deleteVertices(mesh, vertices) {
+        const result = MeshWeld.removeVertices(mesh, vertices);
+        const triangles = (mesh.getIndices()?.length ?? 0) / 3 - result.indices.length / 3;
+        this._applyGeometry(mesh, result, `Delete ${vertices.length} vertices of ${mesh.name}`);
+        return `Deleted ${result.removed} vertices of ${mesh.name} and ${triangles} triangles`;
+    }
+
+    /**
+     * Merges vertices of a mesh into one at their centre (`MeshWeld.mergeVertices`).
+     * @param {BABYLON.Mesh} mesh
+     * @param {number[]} vertices
+     * @returns {string} what was done
+     */
+    mergeVertices(mesh, vertices) {
+        const result = MeshWeld.mergeVertices(mesh, vertices);
+        this._applyGeometry(mesh, result, `Merge ${vertices.length} vertices of ${mesh.name}`);
+        return `Merged ${vertices.length} vertices of ${mesh.name} into one`;
+    }
+
+    /**
+     * Gives a mesh (and every mesh sharing its geometry) new vertex buffers, indices, sub-meshes and
+     * morph targets: in a `.babylon` text as document ops (the model reloads), else in the scene as
+     * an undoable command. Buffers the result has not (tangents) are removed.
+     * @param {BABYLON.Mesh} mesh
+     * @param {import('./MeshWeld').WeldedMesh} result
+     * @param {string} label
+     */
+    _applyGeometry(mesh, result, label) {
         const users = mesh.geometry?.meshes ?? [mesh];
-        const report = `Welded ${mesh.name}${distance > 0 ? ` (points within ${distance})` : ''}: ${welded.vertexCount} vertices (${welded.removed} merged), smooth normals`;
-        const unknown = [...welded.data.keys()].filter(kind => !VERTEX_PROPERTIES[kind]);
-        if (unknown.length) throw new Error(`${mesh.name} has vertex buffers the editor cannot weld: ${unknown.join(', ')}`);
+        const unknown = [...result.data.keys()].filter(kind => !VERTEX_PROPERTIES[kind]);
+        if (unknown.length) throw new Error(`${mesh.name} has vertex buffers the editor cannot change: ${unknown.join(', ')}`);
+        const subMeshes = result.subMeshes.map(subMesh => ({ ...subMesh, verticesStart: 0, verticesCount: result.vertexCount }));
         const binding = this._binding();
         if (binding) {
             const holder = binding.vertexHolderPath(mesh);
             if (!holder) throw new Error(`${mesh.name} has no place in the file`);
-            const ops = [...welded.data].map(([kind, values]) => ({ op: 'set', path: [...holder, VERTEX_PROPERTIES[kind]], value: Array.from(values, float32) }));
-            ops.push({ op: 'set', path: [...holder, 'indices'], value: welded.indices });
+            const ops = [...result.data].map(([kind, values]) => ({ op: 'set', path: [...holder, VERTEX_PROPERTIES[kind]], value: Array.from(values, float32) }));
+            ops.push({ op: 'set', path: [...holder, 'indices'], value: result.indices });
             // The influences are written expanded (one number per influence)
-            if (welded.data.has(BABYLON.VertexBuffer.MatricesIndicesKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExpanded'], value: true });
-            if (welded.data.has(BABYLON.VertexBuffer.MatricesIndicesExtraKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExtraExpanded'], value: true });
-            if (mesh.isVerticesDataPresent(BABYLON.VertexBuffer.TangentKind)) ops.push({ op: 'set', path: [...holder, 'tangents'], value: null });
+            if (result.data.has(BABYLON.VertexBuffer.MatricesIndicesKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExpanded'], value: true });
+            if (result.data.has(BABYLON.VertexBuffer.MatricesIndicesExtraKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExtraExpanded'], value: true });
+            for (const kind of meshKinds(mesh)) {
+                if (!result.data.has(kind) && VERTEX_PROPERTIES[kind]) ops.push({ op: 'set', path: [...holder, VERTEX_PROPERTIES[kind]], value: null });
+            }
             for (const user of users) {
                 const path = binding.pathOf(user);
-                if (!path) continue;
-                ops.push({ op: 'set', path: [...path, 'subMeshes'], value: welded.subMeshes.map(subMesh => ({ ...subMesh, verticesStart: 0, verticesCount: welded.vertexCount })) });
+                if (path) ops.push({ op: 'set', path: [...path, 'subMeshes'], value: subMeshes });
             }
             // The morph targets of the mesh: their manager is found by the id the mesh refers to
-            if (welded.targets.length) {
+            if (result.targets.length) {
                 const document = binding.document;
                 const meshJson = binding.pathOf(mesh)?.reduce((value, key) => value?.[key], document);
                 const managerIndex = (document.morphTargetManagers ?? []).findIndex(manager => manager?.id === meshJson?.morphTargetManagerId);
                 if (managerIndex < 0) throw new Error(`The morph targets of ${mesh.name} have no place in the file`);
-                welded.targets.forEach(({ data, hadTangents }, targetIndex) => {
+                result.targets.forEach(({ data, hadTangents }, targetIndex) => {
                     const base = ['morphTargetManagers', managerIndex, 'targets', targetIndex];
                     data.forEach((values, key) => ops.push({ op: 'set', path: [...base, key], value: Array.from(values, float32) }));
                     if (hadTangents) ops.push({ op: 'set', path: [...base, 'tangents'], value: null });
                 });
             }
-            this._postOps(`Weld ${mesh.name}`, ops);
-            return report;
+            this._postOps(label, ops);
+            return;
         }
         const geometry = mesh.geometry;
         const manager = mesh.morphTargetManager;
@@ -365,7 +405,7 @@ export class ModelEdits {
             subMeshes: users.map(user => user.subMeshes.map(({ materialIndex, verticesStart, verticesCount, indexStart, indexCount }) => ({ materialIndex, verticesStart, verticesCount, indexStart, indexCount }))),
             targets: targets.map(target => new Map(targetFields.map(([key, get]) => [key, target[get]() ? Float32Array.from(target[get]()) : null]))),
         });
-        const write = ({ data, indices, subMeshes, targets: targetData }) => {
+        const write = ({ data, indices, subMeshes: lists, targets: targetData }) => {
             // The targets first: their size follows the vertices (missing data is cleared)
             targets.forEach((target, index) => targetFields.forEach(([key, , set]) => {
                 const values = targetData[index].get(key);
@@ -376,19 +416,18 @@ export class ModelEdits {
             geometry.setIndices(indices.slice(), data.get(BABYLON.VertexBuffer.PositionKind).length / 3);
             users.forEach((user, userIndex) => {
                 user.releaseSubMeshes();
-                for (const subMesh of subMeshes[userIndex]) new BABYLON.SubMesh(subMesh.materialIndex, subMesh.verticesStart, subMesh.verticesCount, subMesh.indexStart, subMesh.indexCount, user);
+                for (const subMesh of lists[userIndex]) new BABYLON.SubMesh(subMesh.materialIndex, subMesh.verticesStart, subMesh.verticesCount, subMesh.indexStart, subMesh.indexCount, user);
                 user.refreshBoundingInfo();
             });
         };
         const after = {
-            data: welded.data,
-            indices: welded.indices,
-            subMeshes: users.map(() => welded.subMeshes.map(subMesh => ({ ...subMesh, verticesStart: 0, verticesCount: welded.vertexCount }))),
-            targets: welded.targets.map(({ data }) => new Map(targetFields.map(([key]) => [key, data.get(key) ?? null]))),
+            data: result.data,
+            indices: result.indices,
+            subMeshes: users.map(() => subMeshes),
+            targets: result.targets.map(({ data }) => new Map(targetFields.map(([key]) => [key, data.get(key) ?? null]))),
         };
-        this._history.executeMutation(`Weld ${mesh.name}`, capture, () => write(after), state => write(state));
+        this._history.executeMutation(label, capture, () => write(after), state => write(state));
         this._markChanged(mesh, 'modified');
-        return report;
     }
 
     /**

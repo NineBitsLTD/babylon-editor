@@ -15,7 +15,7 @@ const NORMAL_LENGTH = 0.03;
 /** Length of a bone axis as a share of the length of the bone. */
 const AXIS_LENGTH = 0.4;
 
-const VERTEX_COLOR = BABYLON.Color3.FromHexString('#ff2a2a');
+const VERTEX_COLOR = BABYLON.Color3.FromHexString('#ff9f1c');
 /** Size of a vertex point in pixels. */
 const POINT_SIZE = 4;
 

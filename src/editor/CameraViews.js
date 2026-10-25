@@ -510,8 +510,28 @@ export class CameraViews {
             camera?.attachControl(true);
             this._attached = camera;
         }
+        this._applyButtons(camera);
         this._scene.activeCamera = camera;
         this._scene.cameraToUseForPointers = camera;
+    }
+
+    /**
+     * In the selection mode the left button draws a selection rectangle: the camera turns with the
+     * middle button (and pans with the right one).
+     * @param {boolean} on
+     */
+    setSelectMode(on) {
+        this._selectMode = on;
+        this._applyButtons(this._attached);
+    }
+
+    /**
+     * @param {BABYLON.Camera | null} camera
+     */
+    _applyButtons(camera) {
+        const buttons = this._selectMode ? [1, 2] : [0, 1, 2];
+        const inputs = camera?.inputs?.attached ?? {};
+        for (const input of [inputs.pointers, inputs.mouse]) if (input && 'buttons' in input) input.buttons = buttons;
     }
 
     /** Frames the selected view (with more than one view). */

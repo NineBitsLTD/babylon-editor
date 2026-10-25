@@ -22,8 +22,11 @@ import { PopupMenu } from './PopupMenu';
  * @property {{ key: string, label: string }[]} [groups] column groups the user can switch between
  *   (only the value columns of the chosen group are shown); omitted - all columns are shown
  * @property {RowToggle} [rowToggle] a small button in each record (e.g. hide a bone in the 3D view)
- * @property {(row: number) => import('./PropertyPanel').PanelAction[]} [rowMenu] commands of a record,
- *   shown by a right click on it (the record is selected first)
+ * @property {(row: number, rows: number[]) => import('./PropertyPanel').PanelAction[]} [rowMenu] commands
+ *   of a record, shown by a right click on it; rows - the selected records when it is one of them
+ *   (group commands), else just it (it is selected first)
+ * @property {(rows: number[]) => void} [onSelectRows] the selected records changed (Shift+click adds
+ *   or removes one)
  */
 
 /**
@@ -88,6 +91,7 @@ export class DataTable {
      * @param {HTMLElement} element container element
      * @param {{
      *   onSelectRow?: (row: number) => void,
+     *   onSelectRows?: (rows: number[]) => void,
      *   onCellCommit: (column: TableColumn, row: number, oldValue: number | string, newValue: number | string) => void
      * }} handlers
      */
@@ -105,8 +109,10 @@ export class DataTable {
         /** @type {TableColumn[][]} */
         this._lines = [];
         this._rowHeight = LINE_HEIGHT + ROW_PADDING;
-        /** @type {number} */
+        /** @type {number} the record clicked last (the one actions of one record use), or -1 */
         this.selectedRow = -1;
+        /** @type {Set<number>} the selected records (Shift+click adds or removes one) */
+        this.selectedRows = new Set();
 
         this._element = element;
         this._element.classList.add('table');
@@ -132,6 +138,7 @@ export class DataTable {
         this._data = data;
         this._group = null;
         this.selectedRow = -1;
+        this.selectedRows = new Set();
         this._body.scrollTop = 0;
         this._layout();
     }
@@ -180,8 +187,60 @@ export class DataTable {
      */
     selectRow(row) {
         this.selectedRow = row;
+        this.selectedRows = new Set(row >= 0 ? [row] : []);
         this._renderRows();
         this._handlers.onSelectRow?.(row);
+        this._handlers.onSelectRows?.(this.rows);
+    }
+
+    /**
+     * Adds a record to the selection, or removes it when it is selected.
+     * @param {number} row
+     */
+    toggleRow(row) {
+        if (this.selectedRows.has(row)) {
+            this.selectedRows.delete(row);
+            if (this.selectedRow === row) this.selectedRow = [...this.selectedRows].pop() ?? -1;
+        } else {
+            this.selectedRows.add(row);
+            this.selectedRow = row;
+        }
+        this._renderRows();
+        this._handlers.onSelectRow?.(this.selectedRow);
+        this._handlers.onSelectRows?.(this.rows);
+    }
+
+    /**
+     * Changes the selection by several records at once (a selection rectangle of the 3D view):
+     * replaces it, adds them or takes them out; the handlers are told.
+     * @param {number[]} rows
+     * @param {'replace' | 'add' | 'remove'} mode
+     */
+    applySelection(rows, mode) {
+        if (mode === 'replace') this.selectedRows = new Set(rows);
+        else if (mode === 'add') rows.forEach(row => this.selectedRows.add(row));
+        else rows.forEach(row => this.selectedRows.delete(row));
+        if (mode !== 'remove' && rows.length) this.selectedRow = rows[rows.length - 1];
+        else if (!this.selectedRows.has(this.selectedRow)) this.selectedRow = [...this.selectedRows].pop() ?? -1;
+        this._renderRows();
+        this._handlers.onSelectRow?.(this.selectedRow);
+        this._handlers.onSelectRows?.(this.rows);
+    }
+
+    /**
+     * Selects records (e.g. the selection kept while the view is made again).
+     * @param {number[]} rows
+     * @param {number} primary the record clicked last
+     */
+    setSelection(rows, primary) {
+        this.selectedRows = new Set(rows);
+        this.selectedRow = primary;
+        this._renderRows();
+    }
+
+    /** @returns {number[]} the selected records, in order */
+    get rows() {
+        return [...this.selectedRows].sort((a, b) => a - b);
     }
 
     /**
@@ -302,17 +361,20 @@ export class DataTable {
             return cell;
         }, toggle);
         row.classList.add('table__row');
-        row.classList.toggle('table__row--selected', index === this.selectedRow);
+        row.classList.toggle('table__row--selected', this.selectedRows.has(index));
         row.style.height = `${this._rowHeight}px`;
-        row.addEventListener('click', () => {
-            if (this.selectedRow !== index) this.selectRow(index);
+        row.addEventListener('click', (event) => {
+            // Shift+click adds the record to the selection or takes it out
+            if (event.shiftKey) this.toggleRow(index);
+            else if (this.selectedRow !== index || this.selectedRows.size > 1) this.selectRow(index);
         });
         if (this._data.rowMenu) {
             row.addEventListener('contextmenu', (event) => {
                 event.preventDefault();
-                if (this.selectedRow !== index) this.selectRow(index);
+                // A right click on a selected record acts on all selected ones
+                if (!this.selectedRows.has(index)) this.selectRow(index);
                 // Commands that change the model are disabled in a read-only table
-                this._menu.show(event.clientX, event.clientY, this._data.rowMenu(index), {
+                this._menu.show(event.clientX, event.clientY, this._data.rowMenu(index, this.rows), {
                     isDisabled: action => (this._readOnly && !action.transient) || !!action.isDisabled?.(),
                     run: (action) => {
                         action.run();
