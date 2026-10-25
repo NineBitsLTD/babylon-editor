@@ -503,6 +503,29 @@ export class BabylonEditor {
                                 <i className="codicon codicon-list-tree"></i>
                             </button>
                         </div>
+                        <div className="toolbar__group toolbar__cursors">
+                            <button className="toolbar__button toolbar__cursor" data-cursor="view" title="View (V): the left button turns the camera">
+                                <i className="codicon codicon-eye"></i>
+                            </button>
+                            <button className="toolbar__button toolbar__cursor" data-cursor="select" title="Select (Q): the left button selects vertices or bones, also in a rectangle (Shift adds, Option / Alt takes out); in every view; the middle button turns the camera">
+                                <i className="codicon codicon-inspect"></i>
+                            </button>
+                            <button className="toolbar__button toolbar__cursor" data-cursor="edit" title="Edit: select, then move, turn or scale the selected vertices or bones with the gizmo; in every view; the middle button turns the camera">
+                                <i className="codicon codicon-edit"></i>
+                            </button>
+                            <button className="toolbar__button toolbar__tool" data-tool="move" title="Move (W)">
+                                <i className="codicon codicon-move"></i>
+                            </button>
+                            <button className="toolbar__button toolbar__tool" data-tool="rotate" title="Rotate (E)">
+                                <i className="codicon codicon-refresh"></i>
+                            </button>
+                            <button className="toolbar__button toolbar__tool" data-tool="scale" title="Scale (R)">
+                                <i className="codicon codicon-screen-full"></i>
+                            </button>
+                            <button className="toolbar__button toolbar__local" title="Local axes (X): the gizmo takes the axes of the first selected bone, or of the mesh, instead of the world axes">
+                                <i className="codicon codicon-target"></i>
+                            </button>
+                        </div>
                     </div>
                     <div className="workspace">
                         <div className="viewport">
@@ -511,6 +534,11 @@ export class BabylonEditor {
                             <div className="player">
                                 <div className="player__top">
                                     <div className="player__controls player__controls--view">
+                                        <div className="player__group">
+                                            <button className="player__button player__reset" title="Reset the view (camera back to the start position)">
+                                                <i className="codicon codicon-home"></i>
+                                            </button>
+                                        </div>
                                         <div className="player__group">
                                             <button className="player__button player__mode" data-mode="textured" title="Show with textures">
                                                 <i className="codicon codicon-file-media"></i>
@@ -524,12 +552,6 @@ export class BabylonEditor {
                                             <button className="player__button player__overlay" data-overlay="vertices" title="Show the vertices (points over the model)">
                                                 <i className="codicon codicon-circle-small-filled"></i>
                                             </button>
-                                            <button className="player__button player__overlay" data-overlay="normals" title="Show the normals of the vertices (lines along them)">
-                                                <i className="codicon codicon-arrow-up"></i>
-                                            </button>
-                                            <button className="player__button player__overlay" data-overlay="boneAxes" title="Show the axes of the bones (X red, Y green, Z blue: how each bone is turned)">
-                                                <i className="codicon codicon-compass"></i>
-                                            </button>
                                         </div>
                                         <div className="player__group player__group--skeleton player__group--hidden">
                                             <button className="player__button player__mesh" title="Hide mesh">
@@ -540,31 +562,13 @@ export class BabylonEditor {
                                             </button>
                                         </div>
                                         <div className="player__group">
-                                            <button className="player__button player__cursor" data-cursor="view" title="View (V): the left button turns the camera">
-                                                <i className="codicon codicon-eye"></i>
+                                            <button className="player__button player__overlay" data-overlay="normals" title="Show the normals of the vertices (lines along them)">
+                                                <i className="codicon codicon-arrow-up"></i>
                                             </button>
-                                            <button className="player__button player__cursor" data-cursor="select" title="Select (Q): the left button selects vertices or bones, also in a rectangle (Shift adds, Option / Alt takes out); the middle button turns the camera">
-                                                <i className="codicon codicon-inspect"></i>
-                                            </button>
-                                            <button className="player__button player__cursor" data-cursor="edit" title="Edit: select, then move, turn or scale the selected vertices or bones with the gizmo; the middle button turns the camera">
-                                                <i className="codicon codicon-edit"></i>
-                                            </button>
-                                            <button className="player__button player__tool" data-tool="move" title="Move (W)">
-                                                <i className="codicon codicon-move"></i>
-                                            </button>
-                                            <button className="player__button player__tool" data-tool="rotate" title="Rotate (E)">
-                                                <i className="codicon codicon-refresh"></i>
-                                            </button>
-                                            <button className="player__button player__tool" data-tool="scale" title="Scale (R)">
-                                                <i className="codicon codicon-screen-full"></i>
-                                            </button>
-                                            <button className="player__button player__local" title="Local axes (X): the gizmo takes the axes of the first selected bone, or of the mesh, instead of the world axes">
-                                                <i className="codicon codicon-target"></i>
+                                            <button className="player__button player__overlay" data-overlay="boneAxes" title="Show the axes of the bones (X red, Y green, Z blue: how each bone is turned)">
+                                                <i className="codicon codicon-compass"></i>
                                             </button>
                                         </div>
-                                        <button className="player__button player__reset" title="Reset the view (camera back to the start position)">
-                                            <i className="codicon codicon-home"></i>
-                                        </button>
                                     </div>
                                 </div>
                                 <div className="player__bottom">

@@ -97,7 +97,8 @@ h1 {
 		}
 	}
 
-	&__view {
+	&__view,
+	&__button {
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -121,7 +122,8 @@ h1 {
 			background-color: var(--vscode-inputOption-activeBackground);
 		}
 
-		&--hidden {
+		&--hidden,
+		&[hidden] {
 			display: none;
 		}
 
@@ -288,6 +290,12 @@ h1 {
 		margin-right: 4px;
 		padding-right: 4px;
 		border-right: 1px solid var(--vscode-panel-border);
+
+		&:last-child {
+			margin-right: 0;
+			padding-right: 0;
+			border-right: none;
+		}
 
 		&--hidden {
 			display: none;

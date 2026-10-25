@@ -97,10 +97,10 @@ export class Toolbar {
         this._orbitButton = root.querySelector('.player__orbit');
         this._resetButton = root.querySelector('.player__reset');
         /** @type {HTMLButtonElement[]} */
-        this._cursorButtons = [...root.querySelectorAll('.player__cursor')];
+        this._cursorButtons = [...root.querySelectorAll('.toolbar__cursor')];
         /** @type {HTMLButtonElement[]} */
-        this._toolButtons = [...root.querySelectorAll('.player__tool')];
-        this._localButton = root.querySelector('.player__local');
+        this._toolButtons = [...root.querySelectorAll('.toolbar__tool')];
+        this._localButton = root.querySelector('.toolbar__local');
         this._playButton = root.querySelector('.player__play');
         /** @type {HTMLInputElement} */
         this._slider = root.querySelector('.player__slider');
@@ -282,13 +282,13 @@ export class Toolbar {
      */
     setCursor(mode, tool, local) {
         this._localButton.hidden = mode !== 'edit';
-        this._localButton.classList.toggle('player__button--active', local);
+        this._localButton.classList.toggle('toolbar__button--active', local);
         this._localButton.title = local
             ? 'Local axes (X): the gizmo takes the axes of the first selected bone, or of the mesh — click for the world axes'
             : 'World axes (X): click for the local axes of the first selected bone, or of the mesh';
-        this._cursorButtons.forEach(button => button.classList.toggle('player__button--active', button.dataset.cursor === mode));
+        this._cursorButtons.forEach(button => button.classList.toggle('toolbar__button--active', button.dataset.cursor === mode));
         this._toolButtons.forEach((button) => {
-            button.classList.toggle('player__button--active', button.dataset.tool === tool);
+            button.classList.toggle('toolbar__button--active', button.dataset.tool === tool);
             button.hidden = mode !== 'edit';
         });
     }

@@ -16,8 +16,8 @@ const NORMAL_LENGTH = 0.03;
 const AXIS_LENGTH = 0.4;
 
 const VERTEX_COLOR = BABYLON.Color3.FromHexString('#ff9f1c');
-/** Size of a vertex point in pixels. */
-const POINT_SIZE = 4;
+/** Size of a vertex point in pixels (also of the selected vertices). */
+export const POINT_SIZE = 4;
 
 /**
  * @param {BABYLON.Color4 | BABYLON.Color3} color

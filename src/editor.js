@@ -560,7 +560,7 @@ class Editor {
             }
             const mesh = this._selectedMesh();
             if (!mesh) return;
-            const vertex = this._highlighter.pickVertex(mesh, x, y);
+            const vertex = this._highlighter.pickVertex(mesh, x, y, this._vertexOccluders());
             if (vertex < 0) return;
             if (mode === 'remove') this._panel.selectObjects([{ vertex }], 'remove');
             else this._panel.revealObject({ vertex }, mode === 'add');
@@ -654,10 +654,17 @@ class Editor {
         }
         const mesh = this._selectedMesh();
         if (!mesh) return;
-        const occluders = settings.renderMode === 'wireframe' ? null
-            : (this._container?.meshes ?? []).filter(candidate => candidate.isEnabled() && candidate.isVisible && candidate.layerMask !== 0 && candidate.getTotalVertices() > 0);
-        const vertices = ScreenSelection.verticesInRect(this._scene, mesh, rect, occluders);
+        const vertices = ScreenSelection.verticesInRect(this._scene, mesh, rect, this._vertexOccluders());
         this._panel.selectObjects(vertices.map(vertex => ({ vertex })), mode);
+    }
+
+    /**
+     * @returns {BABYLON.AbstractMesh[] | null} the meshes whose polygons hide vertices from a click or
+     *   a selection rectangle in the selected view; none while it shows lines
+     */
+    _vertexOccluders() {
+        if (this._selectedViewSettings().renderMode === 'wireframe') return null;
+        return (this._container?.meshes ?? []).filter(candidate => candidate.isEnabled() && candidate.isVisible && candidate.layerMask !== 0 && candidate.getTotalVertices() > 0);
     }
 
     /**

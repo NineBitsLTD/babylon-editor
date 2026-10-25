@@ -105,38 +105,39 @@ export class ScreenSelection {
             if (inverse > 0 && x >= left && x <= right && y >= top && y <= bottom) inside.push(vertex);
         }
         if (!occluders || !inside.length) return inside;
-        const grid = ScreenSelection._triangleGrid(occluders.map(occluder => (occluder === mesh ? { mesh, screen } : { mesh: occluder, screen: ScreenSelection._project(ScreenSelection.drawnPositions(occluder) ?? new Float32Array(), view) })));
+        const grid = ScreenSelection._occluderGrid(mesh, screen, occluders, view);
         return inside.filter(vertex => !ScreenSelection._hidden(grid, mesh, positions, screen, vertex));
     }
 
     /**
-     * The vertex of a mesh drawn nearest to a point of the canvas, within a radius; the one nearest
-     * the camera when several are.
+     * The vertex of a mesh drawn nearest to a point of the canvas, within a radius; with occluders,
+     * only vertices no triangle of them hides count (as the solid and textured views draw them).
+     * Of copies at one position (flat shading) the first one.
      * @param {BABYLON.Scene} scene
      * @param {BABYLON.AbstractMesh} mesh
      * @param {number} x CSS pixels of the canvas
      * @param {number} y
      * @param {number} radius CSS pixels
+     * @param {BABYLON.AbstractMesh[] | null} occluders the meshes whose triangles hide vertices, or null
      * @returns {number} the vertex, or -1
      */
-    static nearestVertex(scene, mesh, x, y, radius) {
+    static nearestVertex(scene, mesh, x, y, radius, occluders) {
         const view = projection(scene);
         const positions = ScreenSelection.drawnPositions(mesh);
         if (!view || !positions) return -1;
         const screen = ScreenSelection._project(positions, view);
         const [px, py, reach] = [x / view.scale, y / view.scale, radius / view.scale];
-        let best = -1;
-        let bestInverse = 0;
+        const near = [];
         for (let vertex = 0; vertex < screen.length / 3; vertex++) {
-            const inverse = screen[vertex * 3 + 2];
-            if (inverse <= 0 || Math.hypot(screen[vertex * 3] - px, screen[vertex * 3 + 1] - py) > reach) continue;
-            // Nearer to the camera: a larger 1 / depth
-            if (inverse > bestInverse * (1 + 1e-6)) {
-                best = vertex;
-                bestInverse = inverse;
-            }
+            const distance = Math.hypot(screen[vertex * 3] - px, screen[vertex * 3 + 1] - py);
+            if (screen[vertex * 3 + 2] > 0 && distance <= reach) near.push({ vertex, distance });
         }
-        return best;
+        if (!near.length) return -1;
+        // Nearest to the pointer first; the visibility test is made only until one passes
+        near.sort((a, b) => a.distance - b.distance || a.vertex - b.vertex);
+        if (!occluders) return near[0].vertex;
+        const grid = ScreenSelection._occluderGrid(mesh, screen, occluders, view);
+        return near.find(({ vertex }) => !ScreenSelection._hidden(grid, mesh, positions, screen, vertex))?.vertex ?? -1;
     }
 
     /**
@@ -162,6 +163,18 @@ export class ScreenSelection {
             const x = screen[index * 3], y = screen[index * 3 + 1];
             return screen[index * 3 + 2] > 0 && x >= left && x <= right && y >= top && y <= bottom;
         });
+    }
+
+    /**
+     * @param {BABYLON.AbstractMesh} mesh the mesh whose vertices are tested
+     * @param {Float32Array} screen its projected vertices
+     * @param {BABYLON.AbstractMesh[]} occluders
+     * @param {ReturnType<typeof projection>} view
+     * @returns {ReturnType<typeof ScreenSelection._triangleGrid>} the triangles of the occluders on the screen
+     */
+    static _occluderGrid(mesh, screen, occluders, view) {
+        return ScreenSelection._triangleGrid(occluders.map(occluder => (occluder === mesh ? { mesh, screen }
+            : { mesh: occluder, screen: ScreenSelection._project(ScreenSelection.drawnPositions(occluder) ?? new Float32Array(), view) })));
     }
 
     /**

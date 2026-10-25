@@ -8,7 +8,8 @@ export const BONES_LAYER = 0x10000000;
 
 /** Bones are yellow and see-through, so the axes of a bone (ViewRendering) show inside them. */
 const BONE_COLOR = BABYLON.Color4.FromHexString('#ffd60a73');
-const SELECTED_COLOR = BABYLON.Color4.FromHexString('#4fc1ff8c');
+/** The selected bones; selected vertices are drawn in it too. */
+export const SELECTED_COLOR = BABYLON.Color4.FromHexString('#4fc1ff8c');
 /** Base half-width of a pyramid relative to its length. */
 const WIDTH_RATIO = 0.1;
 /** Length of a leaf bone relative to the bone it continues. */
