@@ -127,16 +127,8 @@ h1 {
 
 		&--menu {
 			width: auto;
+			min-width: 26px;
 			padding: 0 2px;
-
-			.toolbar__view-more {
-				display: inline-block;
-			}
-		}
-
-		&-more {
-			display: none;
-			font-size: 10px;
 		}
 
 		&-icon {

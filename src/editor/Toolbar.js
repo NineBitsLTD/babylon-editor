@@ -116,16 +116,11 @@ export class Toolbar {
             this._handlers.onSelectRenderMode(/** @type {RenderMode} */ (button.dataset.mode));
         }));
         this._viewButtons.forEach(button => button.addEventListener('click', () => {
-            // With several cameras the Model button is a menu of the camera to show the model with
-            if (button.dataset.view === 'model' && button.classList.contains('toolbar__view--menu')) {
-                this._showCameraMenu(button);
-                return;
-            }
-            if (button.dataset.view === 'desktop') {
-                this._showLayoutMenu(button);
-                return;
-            }
+            // The view is shown at once (Desktop with its last layout, Model with its camera); the
+            // menu opens too, to choose another layout / camera (Model only with several cameras)
             this._handlers.onSelectView(/** @type {EditorView} */ (button.dataset.view));
+            if (button.dataset.view === 'desktop') this._showLayoutMenu(button);
+            if (button.dataset.view === 'model' && button.classList.contains('toolbar__view--menu')) this._showCameraMenu(button);
         }));
         this._slider.max = String(SLIDER_MAX);
         this._slider.addEventListener('pointerdown', () => this._isSeeking = true);
@@ -188,7 +183,7 @@ export class Toolbar {
         const button = this._viewButtons.find(candidate => candidate.dataset.view === 'model');
         if (!button) return;
         button.classList.toggle('toolbar__view--menu', count > 1);
-        button.title = count > 1 ? 'Show only the model, through a camera…' : 'Show only the model';
+        button.title = count > 1 ? 'Show only the model, and choose its camera…' : 'Show only the model';
     }
 
     /**

@@ -493,13 +493,11 @@ export class BabylonEditor {
                 <div className="editor">
                     <div className="toolbar">
                         <div className="toolbar__group toolbar__views">
-                            <button className="toolbar__view toolbar__view--menu" data-view="desktop" title="Show the model and the inspector: choose a layout…">
+                            <button className="toolbar__view toolbar__view--menu" data-view="desktop" title="Show the model and the inspector, and choose a layout…">
                                 <span className="toolbar__view-icon"></span>
-                                <i className="codicon codicon-chevron-down toolbar__view-more"></i>
                             </button>
                             <button className="toolbar__view" data-view="model" title="Show only the model">
                                 <i className="codicon codicon-device-camera"></i>
-                                <i className="codicon codicon-chevron-down toolbar__view-more"></i>
                             </button>
                             <button className="toolbar__view" data-view="inspector" title="Show only the inspector">
                                 <i className="codicon codicon-list-tree"></i>
