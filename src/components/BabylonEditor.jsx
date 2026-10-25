@@ -526,7 +526,7 @@ export class BabylonEditor {
                                             <i className="codicon codicon-package"></i>
                                         </button>
                                         <button className="player__button player__bones" title="Hide bones">
-                                            <i className="codicon codicon-type-hierarchy"></i>
+                                            <i className="codicon codicon-person"></i>
                                         </button>
                                     </div>
                                     <button className="player__button player__reset" title="Reset the view (camera back to the start position)">
@@ -542,7 +542,13 @@ export class BabylonEditor {
                                         <input className="player__slider" type="range" min="0" max="1000" value="0" title="Position"/>
                                     </div>
                                 </div>
-                                <span className="player__clip player__clip--hidden"></span>
+                                <div className="player__tags">
+                                    <span className="player__tag player__clip player__tag--hidden"></span>
+                                    <span className="player__tag player__skeleton player__tag--hidden">
+                                        <i className="codicon codicon-person"></i>
+                                        <span className="player__skeleton-name"></span>
+                                    </span>
+                                </div>
                             </div>
                         </div>
                         <div className="splitter" title="Drag to resize, double-click to reset"></div>

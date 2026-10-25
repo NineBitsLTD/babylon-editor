@@ -90,6 +90,30 @@ export function triangleCount(mesh) {
 }
 
 /**
+ * @param {BABYLON.Skeleton[]} skeletons
+ * @returns {Set<BABYLON.TransformNode>} the nodes bones are linked to (the joints of glTF skins):
+ *   their transforms are the bones, shown by the skeleton
+ */
+export function jointNodes(skeletons) {
+    return new Set(skeletons.flatMap(skeleton => skeleton.bones.map(bone => bone.getTransformNode()).filter(Boolean)));
+}
+
+/**
+ * The tip of the last bone of a chain, as exporters write it (Blender `Head_end`, FBX `Head_End` /
+ * `Head Nub`): a child of a joint node that is no joint, no mesh, has no children and is not
+ * animated. glTF joints are points, so it is the only place the length of a leaf bone is kept.
+ * @param {BABYLON.Node} node
+ * @param {Set<BABYLON.Node>} joints from `jointNodes`
+ * @param {Set<any>} [animated] targets of animation groups
+ * @returns {boolean}
+ */
+export function isJointTip(node, joints, animated = new Set()) {
+    return node instanceof BABYLON.TransformNode && !(node instanceof BABYLON.AbstractMesh)
+        && !!node.parent && joints.has(node.parent) && !joints.has(node)
+        && node.getChildren().length === 0 && !node.animations?.length && !animated.has(node);
+}
+
+/**
  * Builds the model tree (nodes, materials, textures, skeletons, animations) shown in the Explorer
  * from a loaded asset container. Children are created lazily.
  */
@@ -105,7 +129,7 @@ export class ModelOutline {
         const outline = new ModelOutline(container, animations);
         const allowed = FORMAT_SECTIONS[fileType.toLowerCase()];
         const sections = [
-            outline._section('Nodes', 'symbol-namespace', () => outline._nodeItems(outline._rootNodes())),
+            outline._section('Nodes', 'package', () => outline._nodeItems(outline._rootNodes())),
             outline._section('Materials', 'symbol-color', () => container.materials.map(material => outline._materialItem(material))),
             outline._section('Textures', 'file-media', () => container.textures.map(texture => outline._textureItem(texture))),
             outline._section('Skeletons', 'person', () => container.skeletons.map(skeleton => outline._skeletonItem(skeleton))),
@@ -175,7 +199,7 @@ export class ModelOutline {
         return {
             id: this._id('node'),
             label: () => node.name || '(unnamed)',
-            icon: node instanceof BABYLON.AbstractMesh ? 'symbol-structure' : 'symbol-namespace',
+            icon: node instanceof BABYLON.AbstractMesh ? 'symbol-structure' : 'package',
             description: () => mesh ? `${mesh.getTotalVertices()} v` : '',
             data: { kind: 'node', node },
         };

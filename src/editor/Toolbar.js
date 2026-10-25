@@ -38,6 +38,8 @@ export class Toolbar {
         /** @type {HTMLInputElement} */
         this._slider = root.querySelector('.player__slider');
         this._clipName = root.querySelector('.player__clip');
+        this._skeletonName = root.querySelector('.player__skeleton-name');
+        this._skeletonTag = root.querySelector('.player__skeleton');
         this._skeletonGroup = root.querySelector('.player__group--skeleton');
         this._meshButton = root.querySelector('.player__mesh');
         this._bonesButton = root.querySelector('.player__bones');
@@ -97,14 +99,19 @@ export class Toolbar {
     }
 
     /**
-     * Shows the name of the current clip (clips are picked in the model tree);
-     * the animation controls are hidden when the model has no animations.
+     * Shows the name of the current clip (clips are picked in the model tree) and of the skeleton
+     * it animates; the animation controls are hidden when the model has no animations.
      * @param {string | null} name null when there is no clip
+     * @param {string | null} [skeleton] null when the clip animates no skeleton (nodes only)
      */
-    setClip(name) {
+    setClip(name, skeleton = null) {
         this._clipName.textContent = name ?? '';
         this._clipName.title = name ? `Current animation: ${name}` : '';
-        this._clipName.classList.toggle('player__clip--hidden', name === null);
+        this._clipName.classList.toggle('player__tag--hidden', name === null);
+        const showSkeleton = name !== null && skeleton !== null;
+        this._skeletonName.textContent = showSkeleton ? skeleton : '';
+        this._skeletonTag.title = showSkeleton ? `Skeleton of the current animation: ${skeleton}` : '';
+        this._skeletonTag.classList.toggle('player__tag--hidden', !showSkeleton);
         this._animationGroup.classList.toggle('player__animation--hidden', name === null);
     }
 

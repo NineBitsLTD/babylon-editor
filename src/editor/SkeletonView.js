@@ -1,4 +1,5 @@
 import * as BABYLON from '@babylonjs/core';
+import { isJointTip, jointNodes } from './ModelOutline';
 
 const BONE_COLOR = BABYLON.Color4.FromHexString('#ff9f1cff');
 const SELECTED_COLOR = BABYLON.Color4.FromHexString('#4fc1ffff');
@@ -12,12 +13,13 @@ const TRIANGLES_PER_BONE = VERTICES_PER_BONE / 3;
 const EPSILON = 1e-9;
 
 /**
- * One pyramid: from the head of `from` to the head of `to`, or, for a leaf bone, continuing
- * the direction of its parent bone.
+ * One pyramid: from the head of `from` to the head of `to`, or, for a leaf bone, to its tip node
+ * or else continuing the direction of its parent bone.
  * @typedef {object} BoneSegment
  * @property {number} from bone index of the base (owner of the segment)
  * @property {number} to bone index of the apex, or -1 for a leaf
- * @property {number} parent parent bone index of a leaf, -1 otherwise
+ * @property {number} parent parent bone index of a leaf without a tip, -1 otherwise
+ * @property {BABYLON.TransformNode | null} tip the tip node of a leaf (`Head_end`), else null
  */
 
 /**
@@ -26,17 +28,20 @@ const EPSILON = 1e-9;
  */
 function buildSegments(skeleton) {
     const indexOf = new Map(skeleton.bones.map((bone, index) => [bone, index]));
+    const joints = jointNodes([skeleton]);
     /** @type {BoneSegment[]} */
     const segments = [];
     skeleton.bones.forEach((bone, index) => {
         const children = bone.getChildren().filter(child => indexOf.has(child));
         for (const child of children) {
-            segments.push({ from: index, to: indexOf.get(child), parent: -1 });
+            segments.push({ from: index, to: indexOf.get(child), parent: -1, tip: null });
         }
+        if (children.length) return;
+        const tip = bone.getTransformNode()?.getChildren().find(child => isJointTip(child, joints)) ?? null;
         const parent = bone.getParent();
-        // A root bone without children has no direction to draw
-        if (children.length === 0 && parent && indexOf.has(parent)) {
-            segments.push({ from: index, to: -1, parent: indexOf.get(parent) });
+        // A root bone without children or a tip has no direction to draw
+        if (tip || (parent && indexOf.has(parent))) {
+            segments.push({ from: index, to: -1, parent: tip ? -1 : indexOf.get(parent), tip: /** @type {BABYLON.TransformNode | null} */ (tip) });
         }
     });
     return segments;
@@ -82,10 +87,12 @@ export class SkeletonView {
     /**
      * @param {BABYLON.Scene} scene
      * @param {BABYLON.Skeleton} skeleton
+     * @param {Set<BABYLON.Bone>} [hidden] bones whose pyramids are not drawn (read on every frame)
      */
-    constructor(scene, skeleton) {
+    constructor(scene, skeleton, hidden = new Set()) {
         this._scene = scene;
         this._skeleton = skeleton;
+        this._hiddenBones = hidden;
         // .babylon bones are relative to the skinned mesh; glTF bones follow linked transform nodes
         this._mesh = scene.meshes.find(candidate => candidate.skeleton === skeleton) ?? null;
         this._segments = buildSegments(skeleton);
@@ -198,9 +205,11 @@ export class SkeletonView {
         });
         this._segments.forEach((segment, index) => {
             const head = this._heads[segment.from];
-            const tail = segment.to >= 0
-                ? this._heads[segment.to]
-                : head.add(head.subtract(this._heads[segment.parent]).scaleInPlace(LEAF_RATIO));
+            // A hidden bone collapses to a point: nothing is drawn or picked
+            const tail = this._hiddenBones.has(this._skeleton.bones[segment.from]) ? head
+                : segment.to >= 0 ? this._heads[segment.to]
+                : segment.tip ? segment.tip.getAbsolutePosition()
+                    : head.add(head.subtract(this._heads[segment.parent]).scaleInPlace(LEAF_RATIO));
             writePyramid(this._positions, index * VERTICES_PER_BONE * 3, head, tail);
         });
         BABYLON.VertexData.ComputeNormals(this._positions, this._indices, this._normals);

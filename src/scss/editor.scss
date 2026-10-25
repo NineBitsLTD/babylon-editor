@@ -208,9 +208,17 @@ h1 {
 		}
 	}
 
-	&__clip {
+	&__tags {
+		display: flex;
 		align-self: flex-end;
+		gap: 4px;
 		max-width: 60%;
+		min-width: 0;
+	}
+
+	&__tag {
+		flex: 0 1 auto;
+		min-width: 0;
 		padding: 1px 8px;
 		overflow: hidden;
 		border-radius: 10px;
@@ -222,6 +230,26 @@ h1 {
 		background-color: var(--vscode-badge-background);
 
 		&--hidden {
+			display: none;
+		}
+	}
+
+	&__skeleton {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+
+		.codicon {
+			flex-shrink: 0;
+			font-size: 11px;
+		}
+
+		&-name {
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		&.player__tag--hidden {
 			display: none;
 		}
 	}
@@ -1089,6 +1117,27 @@ h1 {
 			flex: 0 0 auto;
 			display: flex;
 			align-items: center;
+		}
+	}
+
+	&__toggle {
+		display: flex;
+		flex-shrink: 0;
+		align-items: center;
+		margin-left: 4px;
+		padding: 0 2px;
+		border-radius: 3px;
+		cursor: pointer;
+		opacity: 0.7;
+
+		&:hover {
+			opacity: 1;
+			background-color: var(--vscode-toolbar-hoverBackground);
+		}
+
+		&--active {
+			opacity: 1;
+			color: var(--vscode-inputValidation-warningBorder, inherit);
 		}
 	}
 

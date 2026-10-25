@@ -33,6 +33,27 @@ export class SelectionHighlighter {
         this._hidden = new Map();
         /** @type {SkeletonDisplay} */
         this.skeletonDisplay = { mesh: true, bones: true };
+        /** @type {Set<BABYLON.Bone>} bones not drawn in skeleton mode (view only, kept while switching objects) */
+        this.hiddenBones = new Set();
+    }
+
+    /**
+     * @param {BABYLON.Bone} bone
+     * @returns {boolean} the bone is not drawn in skeleton mode
+     */
+    isBoneHidden(bone) {
+        return this.hiddenBones.has(bone);
+    }
+
+    /**
+     * Hides or shows the pyramids of a bone in skeleton mode (its child bones stay); the model is
+     * not changed.
+     * @param {BABYLON.Bone} bone
+     * @param {boolean} hidden
+     */
+    setBoneHidden(bone, hidden) {
+        if (hidden) this.hiddenBones.add(bone);
+        else this.hiddenBones.delete(bone);
     }
 
     /** Whether a skeleton is shown (the skeleton display options apply). */
@@ -84,7 +105,7 @@ export class SelectionHighlighter {
      */
     showSkeleton(skeleton, selected = null) {
         this.clear();
-        this._skeletonView = new SkeletonView(this._scene, skeleton);
+        this._skeletonView = new SkeletonView(this._scene, skeleton, this.hiddenBones);
         this._skeletonView.setSelected(selected);
         this._applySkeletonDisplay();
     }

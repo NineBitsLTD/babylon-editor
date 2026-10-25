@@ -294,7 +294,7 @@ class Editor {
         this._inspectorObjects.clear();
         this._hiddenInView.clear();
         vscode.postMessage({ type: 'treeReset' });
-        this._toolbar.setClip(this._animations.current?.name ?? null);
+        this._showClipTags(this._animations.current);
         // The player is wider with animation controls: it may no longer fit next to the inspector
         this._updateLayout();
         this._toolbar.setPlaying(this._animations.isPlaying);
@@ -443,8 +443,9 @@ class Editor {
             this._tree.reset(ModelOutline.build(container, this._animations, this._type));
             this._inspectorObjects.clear();
             this._hiddenInView.clear();
+            this._highlighter.hiddenBones.clear();
             vscode.postMessage({ type: 'treeReset' });
-            this._toolbar.setClip(this._animations.current?.name ?? null);
+            this._showClipTags(this._animations.current);
             // The player is wider with animation controls: it may no longer fit next to the inspector
             this._updateLayout();
             this._toolbar.setPlaying(this._animations.isPlaying);
@@ -477,6 +478,7 @@ class Editor {
             frame: this._animations.currentFrame,
             selection: this._selection ? { kind: this._selection.data.kind, label: this._selection.label() } : null,
             hiddenInView: [...this._hiddenInView.keys()].map(mesh => mesh.name),
+            hiddenBones: [...this._highlighter.hiddenBones].map(bone => ({ skeleton: bone.getSkeleton().name, bone: bone.name })),
         };
     }
 
@@ -487,6 +489,12 @@ class Editor {
         // Parts hidden in the 3D view stay hidden (matched by name: the reloaded meshes are new objects)
         const hidden = new Set(view.hiddenInView);
         this._container.meshes.filter(mesh => hidden.has(mesh.name)).forEach(mesh => this._setHiddenInView(mesh, true));
+        // Bones hidden in the 3D view too, by skeleton and bone name
+        this._highlighter.hiddenBones.clear();
+        for (const { skeleton: skeletonName, bone: boneName } of view.hiddenBones ?? []) {
+            const bone = this._container.skeletons.find(skeleton => skeleton.name === skeletonName)?.bones.find(candidate => candidate.name === boneName);
+            if (bone) this._highlighter.setBoneHidden(bone, true);
+        }
         const camera = this._scene.activeCamera;
         if (view.camera && camera instanceof BABYLON.ArcRotateCamera) {
             Object.assign(camera, { alpha: view.camera.alpha, beta: view.camera.beta, radius: view.camera.radius });
@@ -682,7 +690,7 @@ class Editor {
             isPose: (skeleton, pose) => !this._animations.isPlaying && !this._camera.autoOrbit && this._animations.isPose(skeleton, pose),
             showFrame: (clip, frame) => {
                 this._animations.showFrame(clip, frame);
-                this._toolbar.setClip(clip.name);
+                this._showClipTags(clip);
                 this._toolbar.setPlaying(false);
             },
             selectedRow: () => this._panel.selectedRow,
@@ -850,11 +858,20 @@ class Editor {
     }
 
     /**
+     * Shows the names of the current clip and of the skeleton it animates in the player.
+     * @param {import('./editor/AnimationController').AnimationClip | null | undefined} clip
+     */
+    _showClipTags(clip) {
+        const skeleton = clip && this._container ? ClipFrameEditor.skeletonOf(clip, this._container) : null;
+        this._toolbar.setClip(clip?.name ?? null, skeleton ? skeleton.name || '(unnamed)' : null);
+    }
+
+    /**
      * @param {number} index
      */
     _selectClip(index) {
         this._animations.select(index);
-        this._toolbar.setClip(this._animations.current?.name ?? null);
+        this._showClipTags(this._animations.current);
         this._toolbar.setPlaying(this._animations.isPlaying);
     }
 
@@ -865,7 +882,7 @@ class Editor {
     _playClip(clip) {
         this._animations.select(clip);
         this._animations.play();
-        this._toolbar.setClip(this._animations.current?.name ?? null);
+        this._showClipTags(this._animations.current);
         this._toolbar.setPlaying(this._animations.isPlaying);
     }
 
@@ -930,7 +947,7 @@ class Editor {
     _refresh() {
         vscode.postMessage({ type: 'treeChanged' });
         this._panel.refresh();
-        this._toolbar.setClip(this._animations.current?.name ?? null);
+        this._showClipTags(this._animations.current);
     }
 
     /**

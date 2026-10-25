@@ -19,6 +19,17 @@
  * @property {() => number} rowCount read on every refresh, so added/removed rows show up
  * @property {{ key: string, label: string }[]} [groups] column groups the user can switch between
  *   (only the value columns of the chosen group are shown); omitted - all columns are shown
+ * @property {RowToggle} [rowToggle] a small button in each record (e.g. hide a bone in the 3D view)
+ */
+
+/**
+ * A button of a record: at the end of its title line, or as the first leading cell without a title.
+ * It does not select the record and works in read-only tables (it changes the view, not the data).
+ * @typedef {object} RowToggle
+ * @property {(row: number) => string} title tooltip
+ * @property {(row: number) => string} icon codicon name without the prefix
+ * @property {(row: number) => boolean} [isActive] shown pressed while it returns true
+ * @property {(row: number) => void} run
  */
 
 const LINE_HEIGHT = 20;
@@ -201,9 +212,10 @@ export class DataTable {
      * @param {(column: TableColumn) => HTMLElement} createCell
      * @returns {HTMLElement}
      */
-    _renderRecord(createCell) {
+    _renderRecord(createCell, toggle = null) {
         const record = document.createElement('div');
         record.className = 'table__record';
+        if (toggle && !this._title) record.append(toggle);
         for (const column of this._leading) {
             const cell = createCell(column);
             cell.classList.add('table__cell--leading');
@@ -235,6 +247,7 @@ export class DataTable {
         tag.className = 'table__tag';
         tag.textContent = title.textContent;
         title.replaceChildren(tag);
+        if (toggle) title.append(toggle);
         titled.append(title, record);
         return titled;
     }
@@ -271,6 +284,7 @@ export class DataTable {
      * @returns {HTMLElement}
      */
     _renderRow(index) {
+        const toggle = this._data.rowToggle ? this._renderToggle(this._data.rowToggle, index) : null;
         const row = this._renderRecord((column) => {
             const value = column.get(index);
             const cell = this._createCell(typeof value === 'number' ? formatNumber(value, CELL_DIGITS) : String(value ?? ''));
@@ -281,7 +295,7 @@ export class DataTable {
                 cell.addEventListener('dblclick', () => this._editCell(cell, column, index));
             }
             return cell;
-        });
+        }, toggle);
         row.classList.add('table__row');
         row.classList.toggle('table__row--selected', index === this.selectedRow);
         row.style.height = `${this._rowHeight}px`;
@@ -289,6 +303,28 @@ export class DataTable {
             if (this.selectedRow !== index) this.selectRow(index);
         });
         return row;
+    }
+
+    /**
+     * @param {RowToggle} toggle
+     * @param {number} index
+     * @returns {HTMLElement}
+     */
+    _renderToggle(toggle, index) {
+        const button = document.createElement('span');
+        button.className = 'table__toggle';
+        button.setAttribute('role', 'button');
+        button.innerHTML = `<i class="codicon codicon-${toggle.icon(index)}"></i>`;
+        button.title = toggle.title(index);
+        button.classList.toggle('table__toggle--active', !!toggle.isActive?.(index));
+        // Neither selects the record nor edits the title it sits in
+        button.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggle.run(index);
+            this._renderRows();
+        });
+        button.addEventListener('dblclick', event => event.stopPropagation());
+        return button;
     }
 
     /**

@@ -2,7 +2,7 @@ import * as BABYLON from '@babylonjs/core';
 import { BABYLON_FILE_SCHEMA, MATERIAL_TEXTURE_SLOTS, schemaProperties } from './BabylonFileSchema';
 import { ClipFrameEditor } from './ClipFrameEditor';
 import { formatNumber } from './DataTable';
-import { textureLabel, triangleCount } from './ModelOutline';
+import { isJointTip, jointNodes, textureLabel, triangleCount } from './ModelOutline';
 import { SkeletonScale } from './SkeletonScale';
 import { texturePreview } from './TextureImage';
 
@@ -64,15 +64,6 @@ function requiredBones(mesh) {
         }
     }
     return highest + 1;
-}
-
-/**
- * @param {BABYLON.AssetContainer} container
- * @returns {Set<BABYLON.TransformNode>} the nodes bones are linked to (the joints of glTF skins):
- *   their transforms are the bones, shown by the skeleton
- */
-function jointNodes(container) {
-    return new Set(container.skeletons.flatMap(skeleton => skeleton.bones.map(bone => bone.getTransformNode()).filter(Boolean)));
 }
 
 /**
@@ -488,12 +479,15 @@ export class ModelProperties {
         const { container } = context;
         const own = new Set([...container.meshes, ...container.transformNodes]);
         const descendants = node.getDescendants(false, child => own.has(child));
-        const joints = jointNodes(container);
-        const jointCount = descendants.filter(child => joints.has(child)).length;
+        // Joint nodes and the tips of leaf bones repeat the skeleton
+        const joints = jointNodes(container.skeletons);
+        const animated = new Set(container.animationGroups.flatMap(group => group.targetedAnimations.map(({ target }) => target)));
+        const ofSkeleton = new Set(descendants.filter(child => joints.has(child) || isJointTip(child, joints, animated)));
+        const jointCount = ofSkeleton.size;
         const entry = (child, description) => ({
             label: () => child.name || '(unnamed)',
             description,
-            icon: child instanceof BABYLON.AbstractMesh ? 'symbol-structure' : 'symbol-namespace',
+            icon: child instanceof BABYLON.AbstractMesh ? 'symbol-structure' : 'package',
             properties: () => ModelProperties._nodeProperties(child, context),
             actions: ModelProperties._listedObjectActions({ kind: 'node', node: child }, context, true),
             onOpen: () => ModelProperties.highlight({ kind: 'node', node: child }, context),
@@ -506,13 +500,13 @@ export class ModelProperties {
                     .filter(child => !(child instanceof BABYLON.AbstractMesh))
                     .map(child => ({
                         ...entry(child, () => (child.parent && child.parent !== node ? `in ${child.parent.name}` : '')),
-                        // Joint nodes repeat the bones of the skeleton: hidden unless asked for
-                        ...(joints.has(child) ? { isHidden: () => !context.showJointNodes() } : {}),
+                        // Hidden unless asked for
+                        ...(ofSkeleton.has(child) ? { isHidden: () => !context.showJointNodes() } : {}),
                     })),
                 ...(jointCount ? {
                     toggle: {
                         label: 'Bone nodes',
-                        title: () => (context.showJointNodes() ? `Hide the ${jointCount} nodes of the skeleton bones` : `Show the ${jointCount} nodes of the skeleton bones`),
+                        title: () => (context.showJointNodes() ? `Hide the ${jointCount} nodes of the skeleton (joints and bone tips)` : `Show the ${jointCount} nodes of the skeleton (joints and bone tips)`),
                         icon: () => (context.showJointNodes() ? 'eye' : 'eye-closed'),
                         transient: true,
                         run: () => context.setShowJointNodes(!context.showJointNodes()),
@@ -1071,6 +1065,13 @@ export class ModelProperties {
                     ? 'Rest pose of the bones relative to the parent bone; an edited bone shows it while no animation is playing. Double-click a bone name to rename it.'
                     : 'Bind pose: where the joints sit relative to the mesh. Editing it changes how the mesh is skinned, so every animation will deform the mesh differently. Double-click a value to edit it, a bone name to rename it.',
                 rowCount: () => bones.length,
+                // Shared by the Rest and Bind tables: hides the bone in the 3D view only
+                rowToggle: {
+                    title: row => (highlighter.isBoneHidden(bones[row]) ? 'Show the bone in the 3D view' : 'Hide the bone in the 3D view (the file is not changed)'),
+                    icon: row => (highlighter.isBoneHidden(bones[row]) ? 'eye-closed' : 'eye'),
+                    isActive: row => highlighter.isBoneHidden(bones[row]),
+                    run: row => highlighter.setBoneHidden(bones[row], !highlighter.isBoneHidden(bones[row])),
+                },
                 onSelectRow: row => highlighter.selectBone(bones[row] ?? null),
                 rowOf: object => bones.indexOf(object),
             },
