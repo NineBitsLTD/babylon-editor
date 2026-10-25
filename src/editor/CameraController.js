@@ -4,6 +4,19 @@ import * as BABYLON from '@babylonjs/core';
 const PREVIEW_CAMERA_NAME = 'Preview camera';
 
 /**
+ * The base cameras made with the preview camera, at the same distance from the model: from above,
+ * from the side and from the front (the side the model faces), turned from the front by alpha / at beta.
+ * They are orthographic: the size of the view follows the radius, so the wheel zooms as usual.
+ */
+const BASE_VIEWS = [
+    { key: 'top', name: 'Top view', turn: 0, beta: 0.01 },
+    { key: 'side', name: 'Side view', turn: Math.PI / 2, beta: Math.PI / 2 },
+    { key: 'front', name: 'Front view', turn: 0, beta: Math.PI / 2 },
+];
+
+/** @typedef {{ alpha: number, beta: number, radius: number, target: BABYLON.Vector3 }} CameraHome */
+
+/**
  * Owns the orbit camera: frames the loaded model and keeps the auto-orbit state across reloads.
  * Auto-orbit pauses while the user interacts and resumes after a short idle delay. The left button
  * rotates, the right button pans (the model follows the cursor), the wheel zooms.
@@ -18,11 +31,16 @@ export class CameraController {
         this._scene = scene;
         this._autoOrbit = autoOrbit;
         this._orbitSpeed = orbitSpeed;
-        /** @type {{ alpha: number, beta: number, radius: number, target: BABYLON.Vector3 } | null} */
-        this._home = null;
+        /** @type {Map<BABYLON.Camera, CameraHome>} framed positions of the preview and base cameras */
+        this._homes = new Map();
         /** @type {BABYLON.Camera | null} the preview camera (not part of the model) */
         this.camera = null;
-        scene.onBeforeRenderObservable.add(() => this._updatePanning());
+        /** @type {{ key: string, camera: BABYLON.Camera }[]} the base cameras: top, side and front views */
+        this.baseCameras = [];
+        scene.onBeforeRenderObservable.add(() => {
+            this._updatePanning();
+            this._updateOrthographic();
+        });
     }
 
     get autoOrbit() {
@@ -49,20 +67,70 @@ export class CameraController {
         this.camera = camera;
         if (frontIsPositiveZ && camera instanceof BABYLON.ArcRotateCamera) camera.alpha += Math.PI;
         if (!this._scene.lights.length) this._scene.createDefaultLight();
-        this._home = camera instanceof BABYLON.ArcRotateCamera
-            ? { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() }
-            : null;
+        this._homes.clear();
+        if (camera instanceof BABYLON.ArcRotateCamera) {
+            this._homes.set(camera, { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() });
+        }
+        this._makeBaseCameras(camera);
         this._applyAutoOrbit();
     }
 
-    /** Moves the preview camera back to the position it had when the model was framed. */
-    resetView() {
-        const camera = this.camera;
-        if (!this._home || !(camera instanceof BABYLON.ArcRotateCamera)) return;
+    /** @returns {{ ref: string, camera: BABYLON.Camera }[]} the preview camera, then the base cameras */
+    get views() {
+        return [
+            ...(this.camera ? [{ ref: 'preview', camera: this.camera }] : []),
+            ...this.baseCameras.map(({ key, camera }) => ({ ref: `base:${key}`, camera })),
+        ];
+    }
+
+    /**
+     * The base cameras of a newly framed model: copies of the preview camera (the same distance,
+     * target and settings) turned to look from above, from the side and from the front.
+     * @param {BABYLON.Camera} preview
+     */
+    _makeBaseCameras(preview) {
+        this.baseCameras.forEach(({ camera }) => camera.dispose());
+        this.baseCameras = [];
+        const home = this._homes.get(preview);
+        if (!(preview instanceof BABYLON.ArcRotateCamera) || !home) return;
+        // The front is where the framed preview camera looks from (glTF models are turned around)
+        for (const { key, name, turn, beta } of BASE_VIEWS) {
+            const camera = /** @type {BABYLON.ArcRotateCamera} */ (preview.clone(name));
+            camera.id = name;
+            camera.useAutoRotationBehavior = false;
+            camera.mode = BABYLON.Camera.ORTHOGRAPHIC_CAMERA;
+            Object.assign(camera, { alpha: home.alpha + turn, beta, radius: home.radius });
+            camera.setTarget(home.target.clone());
+            this._homes.set(camera, { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: home.target.clone() });
+            this.baseCameras.push({ key, camera });
+        }
+    }
+
+    /**
+     * The orthographic base cameras show what a perspective camera at their radius would show in
+     * its middle: half the height is `radius · tan(fov / 2)`, the width follows the aspect of the view.
+     */
+    _updateOrthographic() {
+        const engine = this._scene.getEngine();
+        for (const { camera } of this.baseCameras) {
+            if (camera.mode !== BABYLON.Camera.ORTHOGRAPHIC_CAMERA || !(camera instanceof BABYLON.ArcRotateCamera)) continue;
+            const half = camera.radius * Math.tan(camera.fov / 2);
+            const aspect = engine.getAspectRatio(camera);
+            Object.assign(camera, { orthoTop: half, orthoBottom: -half, orthoLeft: -half * aspect, orthoRight: half * aspect });
+        }
+    }
+
+    /**
+     * Moves the preview camera, or a base camera, back to the position it had when the model was framed.
+     * @param {BABYLON.Camera | null} [camera]
+     */
+    resetView(camera = this.camera) {
+        const home = camera && this._homes.get(camera);
+        if (!home || !(camera instanceof BABYLON.ArcRotateCamera)) return;
         camera.inertialAlphaOffset = camera.inertialBetaOffset = camera.inertialRadiusOffset = 0;
         camera.inertialPanningX = camera.inertialPanningY = 0;
-        Object.assign(camera, { alpha: this._home.alpha, beta: this._home.beta, radius: this._home.radius });
-        camera.setTarget(this._home.target.clone());
+        Object.assign(camera, { alpha: home.alpha, beta: home.beta, radius: home.radius });
+        camera.setTarget(home.target.clone());
     }
 
     /**

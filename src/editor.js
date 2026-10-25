@@ -30,6 +30,8 @@ window.fflate = fflate;
 
 /** Below this width (px) of the editor the model and the inspector are shown one at a time. */
 const NARROW_WIDTH = 500;
+/** Below this height of the editor the layouts with 3 and 4 camera views (rows of half the height) are not offered. */
+const SHORT_HEIGHT = 400;
 
 /**
  * View settings (view, singleView, renderMode, uvColor, showUv): this panel's own (restored with the panel),
@@ -184,7 +186,7 @@ class Editor {
         this._cameraViews = new CameraViews({
             scene: this._scene,
             viewport: root.querySelector('.viewport'),
-            preview: () => this._camera.camera,
+            previews: () => this._camera.views,
             onTagClick: (index, tag) => this._showViewCameraMenu(index, tag),
             onChange: () => this._saveCameraViews(),
             state: vscode.getState()?.cameraViews,
@@ -304,8 +306,11 @@ class Editor {
         const left = this._layout.side === 'left';
         this._root.querySelector('.workspace').classList.toggle('workspace--inspector-left', left);
         this._resizer.side = left ? 'left' : 'right';
-        this._cameraViews?.setCount(shown === 'desktop' ? this._layout.count : 1);
-        this._toolbar.setDesktopLayout(this._layout);
+        // A low editor shows a layout of 3 or 4 views with 2 (the chosen layout is kept)
+        const maxCount = workspace.clientHeight < SHORT_HEIGHT ? 2 : 4;
+        const layout = { ...this._layout, count: Math.min(this._layout.count, maxCount) };
+        this._cameraViews?.setCount(shown === 'desktop' ? layout.count : 1);
+        this._toolbar.setDesktopLayout(layout, maxCount);
         this._toolbar.setLayout(shown, this._narrow || cramped);
     }
 
@@ -445,7 +450,7 @@ class Editor {
     _resetTree() {
         if (!this._container) return;
         this._tree.reset(ModelOutline.build(this._container, this._animations, this._type, {
-            preview: this._camera.camera,
+            previews: this._camera.views.map(({ camera }) => camera),
             virtual: this._cameraViews.virtualCameras,
         }));
         vscode.postMessage({ type: 'treeReset' });
@@ -551,7 +556,8 @@ class Editor {
             },
             onResetView: () => {
                 // The camera of the view with the mouse: the preview camera goes to its framed position
-                if (this._cameraViews.resetFocused() === 'preview') this._camera.resetView();
+                const entry = this._cameraViews.resetFocused();
+                if (entry?.kind === 'preview') this._camera.resetView(entry.camera);
                 this._saveCameraViews();
             },
             onToggleMesh: () => this._toggleSkeletonDisplay('mesh'),

@@ -131,14 +131,13 @@ export class ModelOutline {
      * @param {BABYLON.AssetContainer} container
      * @param {import('./AnimationController').AnimationController} animations
      * @param {string} [fileType] extension without the dot; sections the format cannot contain are left out
-     * @param {{ preview: BABYLON.Camera | null, virtual: BABYLON.Camera[] }} [viewCameras] the cameras of
-     *   the views that are not in the file: Cameras lists the preview camera first (`preview: true`),
-     *   then the cameras of the file (pinned), then the virtual cameras (`virtual: true`); the section
-     *   is there for every format
+     * @param {{ previews: BABYLON.Camera[], virtual: BABYLON.Camera[] }} [viewCameras] the cameras of
+     *   the views that are not in the file: Cameras lists the preview and base cameras first
+     *   (`preview: true`), then the cameras of the file (pinned), then the virtual cameras
+     *   (`virtual: true`); the section is there for every format
      * @returns {TreeItem[]}
      */
-    static build(container, animations, fileType = '', viewCameras = { preview: null, virtual: [] }) {
-        const previewCamera = viewCameras.preview;
+    static build(container, animations, fileType = '', viewCameras = { previews: [], virtual: [] }) {
         const outline = new ModelOutline(container, animations);
         const formatSections = FORMAT_SECTIONS[fileType.toLowerCase()];
         const allowed = formatSections ? [...formatSections, 'Cameras'] : formatSections;
@@ -153,7 +152,7 @@ export class ModelOutline {
                 ...animations.clips.map(clip => outline._clipItem(clip)),
             ]),
             outline._section('Cameras', 'device-camera', () => [
-                ...(previewCamera ? [outline._cameraItem(previewCamera, 'preview')] : []),
+                ...viewCameras.previews.map(camera => outline._cameraItem(camera, 'preview')),
                 ...container.cameras.map(camera => outline._cameraItem(camera, 'file')),
                 ...viewCameras.virtual.map(camera => outline._cameraItem(camera, 'virtual')),
             ]),

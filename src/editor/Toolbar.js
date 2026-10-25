@@ -188,10 +188,12 @@ export class Toolbar {
 
     /**
      * Shows the icon of the layout of the desktop view on its button.
-     * @param {ViewLayout} layout
+     * @param {ViewLayout} layout the layout shown
+     * @param {number} [maxCount] the most camera views the menu offers (fewer in a low editor)
      */
-    setDesktopLayout(layout) {
+    setDesktopLayout(layout, maxCount = 4) {
         this._layout = layout;
+        this._maxCount = maxCount;
         const icon = this._viewButtons.find(candidate => candidate.dataset.view === 'desktop')?.querySelector('.toolbar__view-icon');
         if (icon) icon.innerHTML = layoutIcon(layout);
     }
@@ -201,13 +203,15 @@ export class Toolbar {
      */
     _showLayoutMenu(button) {
         const { left, bottom } = button.getBoundingClientRect();
-        const actions = LAYOUTS.map(layout => ({
+        const layouts = LAYOUTS.filter(layout => layout.count <= (this._maxCount ?? 4));
+        const actions = layouts.map(layout => ({
             label: `Inspector on the ${layout.side}, ${layout.count} camera view${layout.count > 1 ? 's' : ''}`,
             svg: layoutIcon(layout),
             isActive: () => this._layout?.side === layout.side && this._layout?.count === layout.count,
             run: () => this._handlers.onSelectLayout(layout),
         }));
-        this._cameraMenu.show(left, bottom + 2, actions, { isDisabled: () => false, run: action => action.run(), columns: 4 });
+        // One line per side of the inspector
+        this._cameraMenu.show(left, bottom + 2, actions, { isDisabled: () => false, run: action => action.run(), columns: layouts.length / 2 });
     }
 
     /**

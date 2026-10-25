@@ -9,7 +9,7 @@ import * as BABYLON from '@babylonjs/core';
  * A camera a view can show: the preview camera, a camera of the file (shown through a copy, so
  * moving it does not change the file) or a virtual camera (only in memory).
  * @typedef {object} ViewCameraEntry
- * @property {string} ref `preview`, `file:<id>` or `virtual:<id>`
+ * @property {string} ref `preview`, `base:<top | side | front>`, `file:<id>` or `virtual:<id>`
  * @property {'preview' | 'file' | 'virtual'} kind
  * @property {BABYLON.Camera} camera the camera of the model tree and the inspector
  * @property {string} label
@@ -53,15 +53,16 @@ export class CameraViews {
      * @param {object} options
      * @param {BABYLON.Scene} options.scene
      * @param {HTMLElement} options.viewport the element over the canvas (pointer events, tags)
-     * @param {() => BABYLON.Camera | null} options.preview the preview camera
+     * @param {() => { ref: string, camera: BABYLON.Camera }[]} options.previews the preview camera and
+     *   the base cameras (top, side, front views): not in the file
      * @param {(index: number, tag: HTMLElement) => void} options.onTagClick the camera tag of a view was clicked
      * @param {() => void} options.onChange the cameras or their places changed (kept in the webview state)
      * @param {CameraViewsState} [options.state]
      */
-    constructor({ scene, viewport, preview, onTagClick, onChange, state }) {
+    constructor({ scene, viewport, previews, onTagClick, onChange, state }) {
         this._scene = scene;
         this._viewport = viewport;
-        this._preview = preview;
+        this._previews = previews;
         this._onTagClick = onTagClick;
         this._onChange = onChange;
         /** @type {BABYLON.AssetContainer | null} */
@@ -131,9 +132,8 @@ export class CameraViews {
 
     /** @returns {ViewCameraEntry[]} the cameras views can show, as in the model tree */
     cameras() {
-        const preview = this._preview();
         return [
-            ...(preview ? [{ ref: 'preview', kind: /** @type {const} */ ('preview'), camera: preview, label: preview.name }] : []),
+            ...this._previews().map(({ ref, camera }) => ({ ref, kind: /** @type {const} */ ('preview'), camera, label: camera.name })),
             ...(this._container?.cameras ?? []).map(camera => ({ ref: `file:${camera.id}`, kind: /** @type {const} */ ('file'), camera, label: camera.name })),
             ...[...this._virtual].map(([id, { camera }]) => ({ ref: `virtual:${id}`, kind: /** @type {const} */ ('virtual'), camera, label: camera.name })),
         ];
@@ -167,10 +167,10 @@ export class CameraViews {
     }
 
     /**
-     * Moves the camera of the view with the mouse controls back: the preview camera to its framed
-     * position (done by the caller, which knows it), a file camera to the values of the file, a
+     * Moves the camera of the view with the mouse controls back: the preview and base cameras to
+     * their framed position (done by the caller, which knows it), a file camera to the values of the file, a
      * virtual camera to the values it was created or last added to the file with.
-     * @returns {'preview' | 'file' | 'virtual' | null} the kind of the camera
+     * @returns {ViewCameraEntry | null} the camera of the focused view
      */
     resetFocused() {
         const entry = this.entryOf(this._focus);
@@ -190,7 +190,7 @@ export class CameraViews {
                 this._onChange();
             }
         }
-        return entry.kind;
+        return entry;
     }
 
     /**
