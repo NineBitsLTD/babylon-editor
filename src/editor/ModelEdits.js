@@ -1,8 +1,10 @@
 import * as BABYLON from '@babylonjs/core';
 import { MATERIAL_TEXTURE_SLOTS } from './BabylonFileSchema';
-import { babylonJsonReplacer, serializeKeys } from './BabylonJsonBinding';
+import { babylonJsonReplacer, float32, serializeKeys } from './BabylonJsonBinding';
 import { modelKeys } from './AnimationController';
 import { ClipConverter, decomposeTransform } from './ClipConverter';
+import { BoneRemoval } from './BoneRemoval';
+import { MeshWeld, meshKinds, VERTEX_PROPERTIES } from './MeshWeld';
 import { ClipRetarget } from './ClipRetarget';
 import { ModelConverter } from './ModelConverter';
 
@@ -293,6 +295,100 @@ export class ModelEdits {
         } else {
             this._addToScene(section, type, name, extra);
         }
+    }
+
+    /**
+     * Deletes a bone from its skeleton (`BoneRemoval`: its children, the weights of its vertices and
+     * its linked node go to its parent) as one undoable change of the `.babylon` text.
+     * @param {BABYLON.Bone} bone
+     * @returns {string} what was done
+     */
+    deleteBone(bone) {
+        const binding = this._binding();
+        if (!binding) throw new Error('Deleting a bone needs the .babylon text of the model (models too large for it stay in the binary editor)');
+        const { ops, report } = BoneRemoval.ops(bone, { container: this._container(), binding, bones: ModelEdits._copySkeleton(bone.getSkeleton()).bones });
+        this._postOps(`Delete bone ${bone.name}`, ops);
+        return report;
+    }
+
+    /**
+     * Welds the vertices of a mesh at one position into one with smooth normals (`MeshWeld`), for
+     * every mesh sharing its geometry: in a `.babylon` text as document ops (the model reloads),
+     * else in the scene as an undoable command.
+     * @param {BABYLON.Mesh} mesh
+     * @param {number} [distance] points this close are one point (0: the same position)
+     * @returns {string} what was done
+     */
+    weldVertices(mesh, distance = 0) {
+        const welded = MeshWeld.compute(mesh, { distance });
+        const users = mesh.geometry?.meshes ?? [mesh];
+        const report = `Welded ${mesh.name}${distance > 0 ? ` (points within ${distance})` : ''}: ${welded.vertexCount} vertices (${welded.removed} merged), smooth normals`;
+        const unknown = [...welded.data.keys()].filter(kind => !VERTEX_PROPERTIES[kind]);
+        if (unknown.length) throw new Error(`${mesh.name} has vertex buffers the editor cannot weld: ${unknown.join(', ')}`);
+        const binding = this._binding();
+        if (binding) {
+            const holder = binding.vertexHolderPath(mesh);
+            if (!holder) throw new Error(`${mesh.name} has no place in the file`);
+            const ops = [...welded.data].map(([kind, values]) => ({ op: 'set', path: [...holder, VERTEX_PROPERTIES[kind]], value: Array.from(values, float32) }));
+            ops.push({ op: 'set', path: [...holder, 'indices'], value: welded.indices });
+            // The influences are written expanded (one number per influence)
+            if (welded.data.has(BABYLON.VertexBuffer.MatricesIndicesKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExpanded'], value: true });
+            if (welded.data.has(BABYLON.VertexBuffer.MatricesIndicesExtraKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExtraExpanded'], value: true });
+            if (mesh.isVerticesDataPresent(BABYLON.VertexBuffer.TangentKind)) ops.push({ op: 'set', path: [...holder, 'tangents'], value: null });
+            for (const user of users) {
+                const path = binding.pathOf(user);
+                if (!path) continue;
+                ops.push({ op: 'set', path: [...path, 'subMeshes'], value: welded.subMeshes.map(subMesh => ({ ...subMesh, verticesStart: 0, verticesCount: welded.vertexCount })) });
+            }
+            // The morph targets of the mesh: their manager is found by the id the mesh refers to
+            if (welded.targets.length) {
+                const document = binding.document;
+                const meshJson = binding.pathOf(mesh)?.reduce((value, key) => value?.[key], document);
+                const managerIndex = (document.morphTargetManagers ?? []).findIndex(manager => manager?.id === meshJson?.morphTargetManagerId);
+                if (managerIndex < 0) throw new Error(`The morph targets of ${mesh.name} have no place in the file`);
+                welded.targets.forEach(({ data, hadTangents }, targetIndex) => {
+                    const base = ['morphTargetManagers', managerIndex, 'targets', targetIndex];
+                    data.forEach((values, key) => ops.push({ op: 'set', path: [...base, key], value: Array.from(values, float32) }));
+                    if (hadTangents) ops.push({ op: 'set', path: [...base, 'tangents'], value: null });
+                });
+            }
+            this._postOps(`Weld ${mesh.name}`, ops);
+            return report;
+        }
+        const geometry = mesh.geometry;
+        const manager = mesh.morphTargetManager;
+        const targets = Array.from({ length: manager?.numTargets ?? 0 }, (_, index) => manager.getTarget(index));
+        const targetFields = [['positions', 'getPositions', 'setPositions'], ['normals', 'getNormals', 'setNormals'], ['tangents', 'getTangents', 'setTangents'], ['uvs', 'getUVs', 'setUVs'], ['uv2s', 'getUV2s', 'setUV2s'], ['colors', 'getColors', 'setColors']];
+        const capture = () => ({
+            data: new Map(meshKinds(mesh).map(kind => [kind, Float32Array.from(mesh.getVerticesData(kind))])),
+            indices: Array.from(mesh.getIndices() ?? []),
+            subMeshes: users.map(user => user.subMeshes.map(({ materialIndex, verticesStart, verticesCount, indexStart, indexCount }) => ({ materialIndex, verticesStart, verticesCount, indexStart, indexCount }))),
+            targets: targets.map(target => new Map(targetFields.map(([key, get]) => [key, target[get]() ? Float32Array.from(target[get]()) : null]))),
+        });
+        const write = ({ data, indices, subMeshes, targets: targetData }) => {
+            // The targets first: their size follows the vertices (missing data is cleared)
+            targets.forEach((target, index) => targetFields.forEach(([key, , set]) => {
+                const values = targetData[index].get(key);
+                target[set](values ? Float32Array.from(values) : null);
+            }));
+            for (const kind of meshKinds(mesh)) if (!data.has(kind)) geometry.removeVerticesData(kind);
+            data.forEach((values, kind) => geometry.setVerticesData(kind, Float32Array.from(values), true, BABYLON.VertexBuffer.DeduceStride(kind)));
+            geometry.setIndices(indices.slice(), data.get(BABYLON.VertexBuffer.PositionKind).length / 3);
+            users.forEach((user, userIndex) => {
+                user.releaseSubMeshes();
+                for (const subMesh of subMeshes[userIndex]) new BABYLON.SubMesh(subMesh.materialIndex, subMesh.verticesStart, subMesh.verticesCount, subMesh.indexStart, subMesh.indexCount, user);
+                user.refreshBoundingInfo();
+            });
+        };
+        const after = {
+            data: welded.data,
+            indices: welded.indices,
+            subMeshes: users.map(() => welded.subMeshes.map(subMesh => ({ ...subMesh, verticesStart: 0, verticesCount: welded.vertexCount }))),
+            targets: welded.targets.map(({ data }) => new Map(targetFields.map(([key]) => [key, data.get(key) ?? null]))),
+        };
+        this._history.executeMutation(`Weld ${mesh.name}`, capture, () => write(after), state => write(state));
+        this._markChanged(mesh, 'modified');
+        return report;
     }
 
     /**

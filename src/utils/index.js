@@ -1,3 +1,4 @@
+export * from "./BabylonOptimizer";
 export * from "./collapseBabylon";
 export * from "./determineMimeType";
 export * from "./getExtension";

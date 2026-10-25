@@ -1,4 +1,14 @@
 import * as vscode from 'vscode';
+import { BabylonOptimizer } from '../utils/BabylonOptimizer';
+
+/**
+ * @param {Uint8Array} data a `.babylon` document
+ * @returns {Uint8Array} the document without line breaks when the setting says so (`babylonEditor.minifyBabylon`)
+ */
+function minifiedIfSet(data) {
+    if (!vscode.workspace.getConfiguration().get('babylonEditor.minifyBabylon', false)) return data;
+    return new TextEncoder().encode(BabylonOptimizer.minify(new TextDecoder().decode(data)));
+}
 
 /**
  * A model file converted to the `.babylon` format.
@@ -171,7 +181,7 @@ export class ConvertedModels {
      * @returns {Promise<Uint8Array>}
      */
     async export(document, data, type) {
-        if (type === 'babylon') return data;
+        if (type === 'babylon') return minifiedIfSet(data);
         // An OBJ keeps referring to the material library of the converted OBJ; an STL keeps its encoding
         const entry = this._entries.get(document.toString());
         const source = {
@@ -270,7 +280,7 @@ export class ConvertedModels {
             { location: vscode.ProgressLocation.Window, title: `Saving ${name}…` },
             () => convert(type),
         );
-        await vscode.workspace.fs.writeFile(target, data);
+        await vscode.workspace.fs.writeFile(target, type === 'babylon' ? minifiedIfSet(data) : data);
         const open = 'Open';
         if (await vscode.window.showInformationMessage(`Saved ${name}.`, open) === open) await vscode.commands.executeCommand('vscode.open', target);
     }
@@ -375,7 +385,7 @@ export class ConvertedModels {
                 producer: { name: 'Babylon Editor', version: this._version, exporter_version: this._version, file: name },
             });
             if (reply.error) throw new Error(`${name} could not be converted: ${reply.error}`);
-            const data = toBytes(reply.data);
+            const data = minifiedIfSet(toBytes(reply.data));
             if (data.byteLength > MAX_TEXT_LENGTH) {
                 throw new Error(`${name} is too large to edit as text (${Math.round(data.byteLength / 1048576)} MB as .babylon)`);
             }

@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -120,6 +120,16 @@
         "command": "babylon-editor.saveAs",
         "title": "Save Model As…",
         "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.roundNumbers",
+        "title": "Round Numbers…",
+        "category": "Babylon"
+      },
+      {
+        "command": "babylon-editor.reduceKeys",
+        "title": "Reduce Animation Keys…",
+        "category": "Babylon"
       }
     ],
     "keybindings": [
@@ -139,6 +149,11 @@
     "configuration": {
       "title": "Babylon Editor",
       "properties": {
+        "babylonEditor.minifyBabylon": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write the .babylon documents the editor makes (converted models, Save Model As, Round Numbers, Reduce Animation Keys) without line breaks and indentation: about a quarter smaller, one long line of text."
+        },
         "babylonEditor.collapseTextEditor": {
           "type": "boolean",
           "default": true,
@@ -152,6 +167,16 @@
           "command": "babylon-editor.saveAs",
           "when": "activeCustomEditorId == babylon-editor.editor || activeCustomEditorId == babylon-editor.textEditor || (resourceScheme == file || resourceScheme == babylon-model || resourceScheme == babylon-text) && resourceExtname == .babylon",
           "group": "1_save@1"
+        },
+        {
+          "command": "babylon-editor.roundNumbers",
+          "when": "activeCustomEditorId == babylon-editor.textEditor || (resourceScheme == file || resourceScheme == babylon-model || resourceScheme == babylon-text) && resourceExtname == .babylon",
+          "group": "2_optimize@1"
+        },
+        {
+          "command": "babylon-editor.reduceKeys",
+          "when": "activeCustomEditorId == babylon-editor.textEditor || (resourceScheme == file || resourceScheme == babylon-model || resourceScheme == babylon-text) && resourceExtname == .babylon",
+          "group": "2_optimize@2"
         },
         {
           "command": "babylon-editor.openInModelEditor",

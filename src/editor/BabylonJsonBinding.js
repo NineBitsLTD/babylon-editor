@@ -178,6 +178,8 @@ export class BabylonJsonBinding {
      * @param {string} rootUrl base of relative texture urls
      */
     constructor(json, container, scene, rootUrl) {
+        /** @type {any} the document as loaded: its structure (array places) is that of the text until the next reload */
+        this.document = json;
         this._scene = scene;
         this._rootUrl = rootUrl;
         /** @type {Map<string, BoundValue>} */
@@ -250,6 +252,34 @@ export class BabylonJsonBinding {
         if (this._values.has(pathKey(path))) return true;
         this._queued.push({ path, value });
         this._present.add(pathKey(path));
+        return true;
+    }
+
+    /**
+     * @param {BABYLON.Mesh} mesh
+     * @returns {(string | number)[] | null} the path of the object holding the vertex arrays of a mesh:
+     *   the mesh, or its shared geometry (`geometryId`, converted glTF models)
+     */
+    vertexHolderPath(mesh) {
+        const base = this._paths.get(mesh);
+        if (!base) return null;
+        const source = base.reduce((value, key) => value?.[key], this.document);
+        const geometryIndex = this._geometries.findIndex(geometry => geometry?.id === source?.geometryId);
+        return geometryIndex >= 0 && !Array.isArray(source?.positions) ? ['geometries', 'vertexData', geometryIndex] : base;
+    }
+
+    /**
+     * Writes a vertex array of a mesh (or of its shared geometry) with the next collect, e.g. the
+     * bone influences, which are not compared.
+     * @param {BABYLON.Mesh} mesh
+     * @param {string} property e.g. `matricesIndices`
+     * @param {any} value
+     * @returns {boolean} whether the mesh has a place in the document
+     */
+    queueVertexPatch(mesh, property, value) {
+        const holder = this.vertexHolderPath(mesh);
+        if (!holder) return false;
+        this._queued.push({ path: [...holder, property], value });
         return true;
     }
 

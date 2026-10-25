@@ -307,6 +307,15 @@ export class AnimationController {
     }
 
     /**
+     * @param {BABYLON.Skeleton} skeleton
+     * @returns {BABYLON.Matrix[]} the local matrices of its bones as they are now, in the space of
+     *   poseMatrix (the pose shown: rest, bind or a frame of a clip)
+     */
+    currentPoses(skeleton) {
+        return skeleton.bones.map(bone => localPose(bone).clone());
+    }
+
+    /**
      * Local matrix of a bone in a pose, in the space its pose is set in.
      * @param {BABYLON.Bone} bone
      * @param {'rest' | 'bind'} pose

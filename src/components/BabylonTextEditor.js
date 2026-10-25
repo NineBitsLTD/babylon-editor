@@ -1,7 +1,17 @@
 import * as vscode from 'vscode';
+import { BabylonOptimizer } from '../utils/BabylonOptimizer';
 import { JsonIndex } from '../utils/JsonIndex';
 import { BabylonTextProvider } from './BabylonTextProvider';
 import { ConvertedModels } from './ConvertedModels';
+
+/**
+ * @param {any} value a value for the `.babylon` text
+ * @returns {string} its JSON; typed arrays (which JSON writes as objects `{"0": …, "1": …}`, larger
+ *   and not read back as arrays) are written as arrays
+ */
+function jsonText(value) {
+    return JSON.stringify(value, (key, item) => (ArrayBuffer.isView(item) && !(item instanceof DataView) ? Array.from(item) : item));
+}
 
 /** @typedef {import('../editor/BabylonJsonBinding').JsonPatch} JsonPatch */
 
@@ -76,6 +86,10 @@ export class BabylonTextEditor {
 
     static saveCommand = 'babylon-editor.save';
     static saveAsCommand = 'babylon-editor.saveAs';
+    static roundNumbersCommand = 'babylon-editor.roundNumbers';
+    static reduceKeysCommand = 'babylon-editor.reduceKeys';
+    /** Setting: `.babylon` documents the editor writes are written without line breaks. */
+    static minifySetting = 'babylonEditor.minifyBabylon';
 
     /**
      * @param {import('./BabylonEditor').BabylonEditor} webviews sets up the editor webview
@@ -119,6 +133,25 @@ export class BabylonTextEditor {
             this._documents.onDidChange(change => this._onDocumentChange(change)),
             vscode.commands.registerCommand(BabylonTextEditor.saveCommand, () => this.saveWithCheck()),
             vscode.commands.registerCommand(BabylonTextEditor.saveAsCommand, () => this._run(() => this.saveAs())),
+            vscode.commands.registerCommand(BabylonTextEditor.roundNumbersCommand, () => this._run(() => this._optimize({
+                title: 'Round the numbers of the model',
+                prompt: 'Decimals to keep (vertex data, matrices, animation keys, colors); whole numbers stay',
+                value: '5',
+                valid: number => Number.isInteger(number) && number >= 0 && number <= 10,
+                invalid: 'Enter a whole number from 0 to 10',
+                apply: (json, digits) => `Rounded ${BabylonOptimizer.roundNumbers(json, digits)} numbers to ${digits} decimals`,
+            }))),
+            vscode.commands.registerCommand(BabylonTextEditor.reduceKeysCommand, () => this._run(() => this._optimize({
+                title: 'Reduce the animation keys of the model',
+                prompt: 'Remove the keys the others give back within this difference of a value (keys at the edges of clips stay)',
+                value: '0.0001',
+                valid: number => Number.isFinite(number) && number >= 0,
+                invalid: 'Enter a number, 0 or greater',
+                apply: (json, tolerance) => {
+                    const { removed, total } = BabylonOptimizer.reduceKeys(json, tolerance);
+                    return `Removed ${removed} of ${total} animation keys (${total ? Math.round(100 * removed / total) : 0}%)`;
+                },
+            }))),
             vscode.workspace.onDidSaveTextDocument((document) => {
                 if (!this._sessions.has(document.uri.toString())) return;
                 this._saved.set(document.uri.toString(), Promise.resolve(this._buildIndex(document.getText())));
@@ -249,6 +282,35 @@ export class BabylonTextEditor {
     /**
      * @param {() => Promise<void>} action
      */
+    /**
+     * Rewrites the `.babylon` document of the active tab after a change of its parsed form (one undo
+     * step), as conversions write it (or without line breaks when the setting says so).
+     * @param {object} options
+     * @param {string} options.title
+     * @param {string} options.prompt
+     * @param {string} options.value the default answer
+     * @param {(number: number) => boolean} options.valid
+     * @param {string} options.invalid the message for an answer that is not valid
+     * @param {(json: any, number: number) => string} options.apply changes the document, returns the report
+     */
+    async _optimize({ title, prompt, value, valid, invalid, apply }) {
+        const active = this._activeModelText();
+        if (!active) throw new Error('Open a .babylon model (or a converted model) first');
+        if (active.text === null) throw new Error('The compact view has placeholders that cannot be restored: use the raw text instead');
+        const parse = input => Number(input.trim().replace(',', '.'));
+        const input = await vscode.window.showInputBox({ title, prompt, value, validateInput: text => (text.trim() !== '' && valid(parse(text)) ? null : invalid) });
+        if (input === undefined) return;
+        const json = JSON.parse(active.text);
+        const report = apply(json, parse(input));
+        const minify = vscode.workspace.getConfiguration().get(BabylonTextEditor.minifySetting, false);
+        const document = await vscode.workspace.openTextDocument(active.real);
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), BabylonOptimizer.format(json, minify));
+        await vscode.workspace.applyEdit(edit);
+        const size = text => `${(new TextEncoder().encode(text).byteLength / 1024).toFixed(0)} KB`;
+        vscode.window.showInformationMessage(`${report}. ${size(active.text)} → ${size(document.getText())} (not saved yet).`);
+    }
+
     async _run(action) {
         try {
             await action();
@@ -425,10 +487,10 @@ export class BabylonTextEditor {
         const array = index.find(arrayPath);
         if (!array) return this._textChange(index, { path: arrayPath, value: values });
         if (array.kind === 'array') {
-            return { start: array.end - 1, end: array.end - 1, text: `${array.children.length ? ', ' : ''}${values.map(value => JSON.stringify(value)).join(', ')}` };
+            return { start: array.end - 1, end: array.end - 1, text: `${array.children.length ? ', ' : ''}${values.map(value => jsonText(value)).join(', ')}` };
         }
         // An empty (or flat) array is a leaf of the index: it is rewritten with the new items
-        return { start: array.start, end: array.end, text: JSON.stringify([...(JSON.parse(this._lastText.slice(array.start, array.end)) ?? []), ...values]) };
+        return { start: array.start, end: array.end, text: jsonText([...(JSON.parse(this._lastText.slice(array.start, array.end)) ?? []), ...values]) };
     }
 
     /**
@@ -479,7 +541,7 @@ export class BabylonTextEditor {
      * @returns {{ start: number, end: number, text: string } | null}
      */
     _textChange(index, { path, value }) {
-        const text = JSON.stringify(value);
+        const text = jsonText(value);
         const node = index.find(path);
         if (node) return { start: node.start, end: node.end, text };
         // A property the file does not have yet is added at the end of its object

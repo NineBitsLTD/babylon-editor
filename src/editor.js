@@ -199,7 +199,11 @@ class Editor {
             onSelect: () => this._syncViewBar(),
             onBeforeView: settings => this._viewRendering.beforeView(settings),
             onAfterView: () => this._viewRendering.afterView(),
-            onVerticesNeeded: needed => this._viewRendering.setPointsNeeded(needed),
+            onOverlaysNeeded: ({ vertices, normals, boneAxes }) => {
+                this._viewRendering.setPointsNeeded(vertices);
+                this._viewRendering.setNormalsNeeded(normals);
+                this._viewRendering.setAxesNeeded(boneAxes);
+            },
             state: vscode.getState()?.cameraViews,
         });
         // The model, the inspector or both (desktop), switched from the toolbar and kept in the
@@ -576,10 +580,9 @@ class Editor {
             },
             onToggleMesh: () => this._toggleSkeletonDisplay('mesh'),
             onToggleBones: () => this._toggleSkeletonDisplay('bones'),
-            onToggleVertices: () => {
-                const shown = !this._selectedViewSettings().vertices;
-                this._cameraViews.setSettings(this._cameraViews.selected, { vertices: shown });
-                this._toolbar.setVertices(shown);
+            onToggleOverlay: (overlay) => {
+                this._cameraViews.setSettings(this._cameraViews.selected, { [overlay]: !this._selectedViewSettings()[overlay] });
+                this._syncViewBar();
             },
             onOpenTag: tag => this._openTag(tag),
             cameras: () => this._cameraViews.cameras().map(entry => ({
@@ -926,6 +929,29 @@ class Editor {
                 const input = await this._host.request('inputBox', { title, prompt, value: String(value), positiveNumber: true });
                 return input === null ? null : Number(input.trim().replace(',', '.'));
             },
+            promptText: (title, prompt, value) => this._host.request('inputBox', { title, prompt, value }),
+            weldVertices: this._canEdit ? async (mesh) => {
+                const input = await this._host.request('inputBox', {
+                    title: `Weld the vertices of ${mesh.name}`,
+                    prompt: 'Points no farther apart than this distance become one point (in the coordinates of the vertex table of the mesh); 0 welds only points at the same position',
+                    value: '0',
+                    nonNegativeNumber: true,
+                });
+                if (input === null) return;
+                try {
+                    this._host.send('showMessage', { level: 'info', text: this._edits.weldVertices(mesh, Number(input.trim().replace(',', '.'))) });
+                } catch (error) {
+                    this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });
+                }
+            } : null,
+            deleteBone: this._binding && this._canEdit ? (bone) => {
+                try {
+                    const report = this._edits.deleteBone(bone);
+                    this._host.send('showMessage', { level: 'info', text: report });
+                } catch (error) {
+                    this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });
+                }
+            } : null,
         };
     }
 
@@ -946,7 +972,7 @@ class Editor {
     /** The view bar shows the settings of the selected view. */
     _syncViewBar() {
         this._toolbar.setRenderMode(this._selectedViewSettings().renderMode);
-        this._toolbar.setVertices(!!this._selectedViewSettings().vertices);
+        this._toolbar.setOverlays(this._selectedViewSettings());
         this._syncSkeletonButtons();
     }
 

@@ -16,6 +16,9 @@ const BASE_VIEWS = [
 
 /** @typedef {{ alpha: number, beta: number, radius: number, target: BABYLON.Vector3 }} CameraHome */
 
+/** Share of the distance a wheel step zooms (the same feel close to the model and far from it). */
+const WHEEL_ZOOM = 0.01;
+
 /**
  * Owns the orbit camera: frames the loaded model and keeps the auto-orbit state across reloads.
  * Auto-orbit pauses while the user interacts and resumes after a short idle delay. The left button
@@ -37,10 +40,13 @@ export class CameraController {
         this.camera = null;
         /** @type {{ key: string, camera: BABYLON.Camera }[]} the base cameras: top, side and front views */
         this.baseCameras = [];
+        /** @type {{ camera: BABYLON.Camera, depth: number } | null} depth of the model under the cursor while panning */
+        this._panDepth = null;
         scene.onBeforeRenderObservable.add(() => {
             this._updatePanning();
             this._updateOrthographic();
         });
+        this._trackPanDepth();
     }
 
     get autoOrbit() {
@@ -144,10 +150,42 @@ export class CameraController {
         const cameras = scene.activeCameras?.length ? scene.activeCameras : [scene.activeCamera];
         for (const camera of cameras) {
             if (!(camera instanceof BABYLON.ArcRotateCamera) || !camera.radius) continue;
+            // The wheel zooms by a share of the distance (Babylon's default step is fixed in units)
+            if (!camera.wheelDeltaPercentage) camera.wheelDeltaPercentage = WHEEL_ZOOM;
             const height = scene.getEngine().getRenderHeight() * camera.viewport.height;
-            const pixelsPerUnit = height / (2 * camera.radius * Math.tan(camera.fov / 2));
+            // The model moves with the cursor at the depth of what was under it when the drag began
+            // (the target may be far from it after zooming in), an orthographic view at its size
+            const depth = this._panDepth?.camera === camera ? this._panDepth.depth : camera.radius;
+            const halfHeight = camera.mode === BABYLON.Camera.ORTHOGRAPHIC_CAMERA && camera.orthoTop
+                ? camera.orthoTop
+                : depth * Math.tan(camera.fov / 2);
+            const pixelsPerUnit = height / (2 * halfHeight);
             camera.panningSensibility = pixelsPerUnit / (1 - camera.panningInertia);
         }
+    }
+
+    /**
+     * Notes the depth of the model point under the cursor when a drag begins (the pick of the
+     * pointer down, in the view under the cursor), until the button is released.
+     */
+    _trackPanDepth() {
+        const { POINTERDOWN, POINTERUP } = BABYLON.PointerEventTypes;
+        this._scene.onPointerObservable.add((info) => {
+            if (info.type === POINTERUP) {
+                this._panDepth = null;
+                return;
+            }
+            if (info.type !== POINTERDOWN) return;
+            const camera = this._scene.cameraToUseForPointers ?? this._scene.activeCamera;
+            const point = info.pickInfo?.hit ? info.pickInfo.pickedPoint : null;
+            if (!camera || !point) {
+                this._panDepth = null;
+                return;
+            }
+            const forward = camera.getForwardRay(1).direction;
+            const depth = BABYLON.Vector3.Dot(point.subtract(camera.globalPosition), forward);
+            this._panDepth = depth > 0 ? { camera, depth } : null;
+        });
     }
 
     /**

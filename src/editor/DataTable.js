@@ -1,3 +1,5 @@
+import { PopupMenu } from './PopupMenu';
+
 /**
  * @typedef {object} TableColumn
  * @property {string} label
@@ -20,6 +22,8 @@
  * @property {{ key: string, label: string }[]} [groups] column groups the user can switch between
  *   (only the value columns of the chosen group are shown); omitted - all columns are shown
  * @property {RowToggle} [rowToggle] a small button in each record (e.g. hide a bone in the 3D view)
+ * @property {(row: number) => import('./PropertyPanel').PanelAction[]} [rowMenu] commands of a record,
+ *   shown by a right click on it (the record is selected first)
  */
 
 /**
@@ -117,6 +121,7 @@ export class DataTable {
         this._body.append(this._spacer, this._rows);
         this._element.append(this._header, this._body);
         this._body.addEventListener('scroll', () => this._renderRows());
+        this._menu = new PopupMenu();
         new ResizeObserver(() => this._renderRows()).observe(this._body);
     }
 
@@ -302,6 +307,20 @@ export class DataTable {
         row.addEventListener('click', () => {
             if (this.selectedRow !== index) this.selectRow(index);
         });
+        if (this._data.rowMenu) {
+            row.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                if (this.selectedRow !== index) this.selectRow(index);
+                // Commands that change the model are disabled in a read-only table
+                this._menu.show(event.clientX, event.clientY, this._data.rowMenu(index), {
+                    isDisabled: action => (this._readOnly && !action.transient) || !!action.isDisabled?.(),
+                    run: (action) => {
+                        action.run();
+                        this.refresh();
+                    },
+                });
+            });
+        }
         return row;
     }
 

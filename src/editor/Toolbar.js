@@ -48,7 +48,7 @@ export function layoutIcon({ side, count }) {
  * @property {() => void} onToggleBones shows/hides the bones in skeleton mode
  * @property {(view: EditorView) => void} onSelectView shows the model, the inspector or both
  * @property {(mode: RenderMode) => void} onSelectRenderMode shows the model with textures, without them or as lines
- * @property {() => void} onToggleVertices shows / hides the vertices as points over the model
+ * @property {(overlay: ViewOverlay) => void} onToggleOverlay shows / hides something over the model in the selected view
  * @property {(tag: PlayerTag) => void} onOpenTag a tag of the player was clicked: show its object
  * @property {() => ViewCamera[]} cameras the cameras the model view can be shown with (read when the
  *   Model button opens its menu)
@@ -59,6 +59,15 @@ export function layoutIcon({ side, count }) {
 /** @typedef {'mesh' | 'skeleton' | 'clip'} PlayerTag */
 
 /** @typedef {'textured' | 'solid' | 'wireframe'} RenderMode */
+
+/** @typedef {'vertices' | 'normals' | 'boneAxes'} ViewOverlay what a view can show over the model */
+
+/** The overlay buttons of the view bar: their tooltips when off / on. */
+const OVERLAYS = {
+    vertices: ['Show the vertices (points over the model)', 'Hide the vertices'],
+    normals: ['Show the normals of the vertices (lines along them)', 'Hide the normals'],
+    boneAxes: ['Show the axes of the bones (X red, Y green, Z blue: how each bone is turned)', 'Hide the axes of the bones'],
+};
 
 /** @typedef {'model' | 'inspector' | 'desktop'} EditorView */
 
@@ -95,7 +104,8 @@ export class Toolbar {
         this._skeletonGroup = root.querySelector('.player__group--skeleton');
         this._meshButton = root.querySelector('.player__mesh');
         this._bonesButton = root.querySelector('.player__bones');
-        this._verticesButton = root.querySelector('.player__vertices');
+        /** @type {Record<ViewOverlay, HTMLElement>} */
+        this._overlayButtons = Object.fromEntries(Object.keys(OVERLAYS).map(key => [key, root.querySelector(`.player__overlay[data-overlay="${key}"]`)]));
         /** @type {HTMLButtonElement[]} */
         this._viewButtons = [...root.querySelectorAll('.toolbar__view')];
         /** @type {HTMLButtonElement[]} */
@@ -111,7 +121,9 @@ export class Toolbar {
         this._playButton.addEventListener('click', () => this._handlers.onTogglePlay());
         this._meshButton.addEventListener('click', () => this._handlers.onToggleMesh());
         this._bonesButton.addEventListener('click', () => this._handlers.onToggleBones());
-        this._verticesButton.addEventListener('click', () => this._handlers.onToggleVertices());
+        Object.entries(this._overlayButtons).forEach(([key, button]) => {
+            button?.addEventListener('click', () => this._handlers.onToggleOverlay(/** @type {ViewOverlay} */ (key)));
+        });
         this._meshTag.addEventListener('click', () => this._handlers.onOpenTag('mesh'));
         this._skeletonTag.addEventListener('click', () => this._handlers.onOpenTag('skeleton'));
         this._clipTag.addEventListener('click', () => this._handlers.onOpenTag('clip'));
@@ -251,11 +263,16 @@ export class Toolbar {
     }
 
     /**
-     * @param {boolean} shown the vertices are shown over the model
+     * Reflects what the selected view shows over the model.
+     * @param {Partial<Record<ViewOverlay, boolean>>} shown
      */
-    setVertices(shown) {
-        this._verticesButton.classList.toggle('player__button--active', shown);
-        this._verticesButton.title = shown ? 'Hide the vertices' : 'Show the vertices (points over the model)';
+    setOverlays(shown) {
+        Object.entries(this._overlayButtons).forEach(([key, button]) => {
+            if (!button) return;
+            const on = !!shown[key];
+            button.classList.toggle('player__button--active', on);
+            button.title = OVERLAYS[key][on ? 1 : 0];
+        });
     }
 
     /**

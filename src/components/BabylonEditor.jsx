@@ -521,8 +521,14 @@ export class BabylonEditor {
                                             <button className="player__button player__mode" data-mode="wireframe" title="Show as lines (wireframe)">
                                                 <i className="codicon codicon-globe"></i>
                                             </button>
-                                            <button className="player__button player__vertices" title="Show the vertices (points over the model)">
+                                            <button className="player__button player__overlay" data-overlay="vertices" title="Show the vertices (points over the model)">
                                                 <i className="codicon codicon-circle-small-filled"></i>
+                                            </button>
+                                            <button className="player__button player__overlay" data-overlay="normals" title="Show the normals of the vertices (lines along them)">
+                                                <i className="codicon codicon-arrow-up"></i>
+                                            </button>
+                                            <button className="player__button player__overlay" data-overlay="boneAxes" title="Show the axes of the bones (X red, Y green, Z blue: how each bone is turned)">
+                                                <i className="codicon codicon-move"></i>
                                             </button>
                                         </div>
                                         <div className="player__group player__group--skeleton player__group--hidden">

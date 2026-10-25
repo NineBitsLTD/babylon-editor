@@ -4,6 +4,7 @@ import { ClipFrameEditor } from './ClipFrameEditor';
 import { formatNumber } from './DataTable';
 import { isJointTip, jointNodes, textureLabel, triangleCount } from './ModelOutline';
 import { SkeletonScale } from './SkeletonScale';
+import { SkinEdits } from './SkinEdits';
 import { texturePreview } from './TextureImage';
 
 /**
@@ -41,6 +42,12 @@ import { texturePreview } from './TextureImage';
  * @property {import('./TextureImage').TextureImage} textureImage commands of the image of a texture
  * @property {(title: string, prompt: string, value: number) => Promise<number | null>} promptNumber asks the
  *   user for a number greater than 0 (null when cancelled)
+ * @property {(title: string, prompt: string, value: string) => Promise<string | null>} promptText asks the
+ *   user for a text (null when cancelled)
+ * @property {((mesh: BABYLON.Mesh) => void) | null} weldVertices welds the vertices at one position
+ *   of a mesh into one with smooth normals (null when the format cannot be edited)
+ * @property {((bone: BABYLON.Bone) => void) | null} deleteBone deletes a bone with its weights and
+ *   node (null when the model has no `.babylon` text)
  */
 
 /** @typedef {import('./PropertyPanel').PropertyDescriptor} PropertyDescriptor */
@@ -263,6 +270,62 @@ function restoreRest(bone, matrix, animations) {
 }
 
 /**
+ * The rest pose of a skeleton: the rest matrices of its bones and the transforms of their linked
+ * nodes (glTF joints), for undo.
+ * @param {BABYLON.Skeleton} skeleton
+ * @returns {{ rest: BABYLON.Matrix[], nodes: ({ position: BABYLON.Vector3, rotation: BABYLON.Vector3, rotationQuaternion: BABYLON.Quaternion | null, scaling: BABYLON.Vector3 } | null)[] }}
+ */
+function captureRestPose(skeleton) {
+    return {
+        rest: skeleton.bones.map(bone => bone.getRestMatrix().clone()),
+        nodes: skeleton.bones.map((bone) => {
+            const node = bone.getTransformNode();
+            return node ? { position: node.position.clone(), rotation: node.rotation.clone(), rotationQuaternion: node.rotationQuaternion?.clone() ?? null, scaling: node.scaling.clone() } : null;
+        }),
+    };
+}
+
+/**
+ * @param {BABYLON.Skeleton} skeleton
+ * @param {ReturnType<typeof captureRestPose>} state
+ */
+function restoreRestPose(skeleton, state) {
+    skeleton.bones.forEach((bone, index) => {
+        bone.setRestMatrix(state.rest[index].clone());
+        const node = bone.getTransformNode();
+        const saved = state.nodes[index];
+        if (node && saved) {
+            node.position.copyFrom(saved.position);
+            node.rotation.copyFrom(saved.rotation);
+            node.rotationQuaternion = saved.rotationQuaternion?.clone() ?? null;
+            node.scaling.copyFrom(saved.scaling);
+        }
+        bone.markAsDirty();
+    });
+}
+
+/**
+ * Makes the bind pose of every bone (where its joint sits relative to the mesh) its rest pose and
+ * shows it. The animations are not changed (they set the poses of the bones themselves). A linked
+ * node (glTF joint) takes the transform too: in the file it is the rest pose of its bone; values the
+ * binding does not compare (nodes an animation drives) are written explicitly.
+ * @param {BABYLON.Skeleton} skeleton
+ * @param {import('./AnimationController').AnimationController} animations
+ * @param {import('./BabylonJsonBinding').BabylonJsonBinding | null} binding
+ */
+function restFromBind(skeleton, animations, binding) {
+    for (const bone of skeleton.bones) bone.setRestMatrix(animations.poseMatrix(bone, 'bind').clone());
+    animations.showPose(skeleton, 'rest');
+    for (const bone of skeleton.bones) {
+        const node = bone.getTransformNode();
+        if (!node || !binding) continue;
+        binding.queuePatch(node, 'position', node.position.asArray());
+        binding.queuePatch(node, 'rotationQuaternion', (node.rotationQuaternion ?? BABYLON.Quaternion.FromEulerVector(node.rotation)).asArray());
+        binding.queuePatch(node, 'scaling', node.scaling.asArray());
+    }
+}
+
+/**
  * @param {BABYLON.Bone} bone
  * @param {{ scaling: BABYLON.Vector3, rotation: BABYLON.Quaternion, position: BABYLON.Vector3 }} parts
  * @param {import('./AnimationController').AnimationController} animations
@@ -468,6 +531,13 @@ export class ModelProperties {
         if (node instanceof BABYLON.Mesh && node.getTotalVertices() > 0) {
             const vertices = ModelProperties._vertices(node, context);
             content.table = { ...vertices.table, title: 'Vertices', notice: vertices.notice };
+            content.actions = [{
+                label: 'Weld vertices',
+                title: 'Merge the vertices at one position into one (texture seams keep theirs) and give them smooth normals; one undo step',
+                icon: 'merge',
+                isDisabled: () => !context.weldVertices,
+                run: () => context.weldVertices?.(node),
+            }];
         }
         return content;
     }
@@ -677,19 +747,37 @@ export class ModelProperties {
     }
 
     /**
-     * The Skin group of the vertex table (read-only): one cell per bone influence with the bone
-     * name and the weight (`matricesIndices` / `matricesWeights`, and their `Extra` buffers for more
-     * than four influences); an influence without weight shows a dash.
+     * The Skin group of the vertex table: one cell per bone influence with the bone name and the
+     * weight (`matricesIndices` / `matricesWeights`, and their `Extra` buffers for more than four
+     * influences); an influence without weight shows a dash. A cell is edited as `<bone> <weight>`
+     * (either part may be left out); the other influences of the vertex are scaled so the weights
+     * add up to 1.
      * @param {BABYLON.Mesh} mesh
      * @param {import('./DataTable').TableColumn[]} columns receives the columns
      * @param {{ key: string, label: string }[]} groups receives the group
+     * @param {import('./BabylonJsonBinding').BabylonJsonBinding | null} [binding]
      */
-    static _skinColumns(mesh, columns, groups) {
+    static _skinColumns(mesh, columns, groups, binding = null) {
         const K = BABYLON.VertexBuffer;
         const sets = [[K.MatricesIndicesKind, K.MatricesWeightsKind], [K.MatricesIndicesExtraKind, K.MatricesWeightsExtraKind]]
             .filter(([indices, weights]) => mesh.isVerticesDataPresent(indices) && mesh.isVerticesDataPresent(weights));
         if (!sets.length) return;
         groups.push({ key: 'skin', label: 'Skin' });
+        const bones = () => mesh.skeleton?.bones ?? [];
+        const boneName = index => bones().find(bone => bone.getIndex() === index)?.name ?? `#${index}`;
+        // `<bone> <weight>`: a missing part keeps the current one
+        const parseInfluence = (text, influence, row) => {
+            const [indicesKind, weightsKind] = sets[Math.floor(influence / 4)];
+            const place = row * 4 + (influence % 4);
+            const match = /^(.*?)\s*(-?\d*[.,]?\d+)?\s*$/.exec(text.trim());
+            const name = match?.[1]?.trim();
+            // An unknown name keeps the bone of the influence
+            const bone = name ? bones().find(candidate => candidate.name === name) : null;
+            return {
+                bone: bone ? bone.getIndex() : mesh.getVerticesData(indicesKind)[place],
+                weight: match?.[2] !== undefined ? Number(match[2].replace(',', '.')) : mesh.getVerticesData(weightsKind)[place],
+            };
+        };
         sets.forEach(([indicesKind, weightsKind], set) => {
             for (let slot = 0; slot < 4; slot++) {
                 columns.push({
@@ -700,8 +788,19 @@ export class ModelProperties {
                         const weight = mesh.getVerticesData(weightsKind)?.[row * 4 + slot] ?? 0;
                         if (!weight) return '—';
                         const index = mesh.getVerticesData(indicesKind)?.[row * 4 + slot] ?? 0;
-                        return `${mesh.skeleton?.bones[index]?.name ?? `#${index}`} ${formatNumber(weight, 3)}`;
+                        return `${boneName(index)} ${formatNumber(weight, 3)}`;
                     },
+                    isEditable: () => !!mesh.skeleton,
+                    set: (row, text) => {
+                        const { bone, weight } = parseInfluence(String(text), set * 4 + slot, row);
+                        SkinEdits.setInfluence(mesh, row, set * 4 + slot, bone, weight, binding);
+                    },
+                    // The whole influences of the vertex (setting one scales the others)
+                    capture: row => sets.map(([indices, weights]) => ({
+                        indices: Array.from(mesh.getVerticesData(indices).slice(row * 4, row * 4 + 4)),
+                        weights: Array.from(mesh.getVerticesData(weights).slice(row * 4, row * 4 + 4)),
+                    })),
+                    restore: (row, state) => SkinEdits.setVertexInfluences(mesh, row, state, binding),
                 });
             }
         });
@@ -714,7 +813,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _vertices(mesh, { highlighter }) {
+    static _vertices(mesh, { highlighter, binding }) {
         const K = BABYLON.VertexBuffer;
         /** @type {import('./DataTable').TableColumn[]} */
         const columns = [{ label: '#', leading: true, width: 56, get: row => row }];
@@ -742,13 +841,13 @@ export class ModelProperties {
         addColumns(K.PositionKind, 'Position', ['X', 'Y', 'Z']);
         addColumns(K.NormalKind, 'Normal', ['NX', 'NY', 'NZ']);
         addColumns(K.UVKind, 'UV', ['U', 'V']);
-        ModelProperties._skinColumns(mesh, columns, groups);
+        ModelProperties._skinColumns(mesh, columns, groups, binding);
 
         const sharedWith = (mesh.geometry?.meshes.length ?? 1) - 1;
         return {
             title: 'Vertices',
             subtitle: () => mesh.name,
-            notice: `Double-click a cell to edit.${sharedWith > 0 ? ` The geometry is shared with ${sharedWith} other mesh(es).` : ''}`,
+            notice: `Double-click a cell to edit (a Skin cell as "<bone> <weight>": the other weights of the vertex are scaled to add up to 1).${sharedWith > 0 ? ` The geometry is shared with ${sharedWith} other mesh(es).` : ''}`,
             table: {
                 columns,
                 groups,
@@ -984,7 +1083,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber }) {
+    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber, promptText, deleteBone }) {
         const bones = skeleton.bones;
         const groups = ['position', 'rotation', 'scaling'];
         /** @type {'rest' | 'bind'} set by the Rest | Bind switch of the panel */
@@ -1044,6 +1143,36 @@ export class ModelProperties {
                 readonlyProperty('Animation ranges', () => skeleton.getAnimationRanges().filter(Boolean).length),
             ],
             actions: [{
+                label: 'Bind to current pose',
+                title: 'Bind the meshes in the pose shown now: their vertices take its shape and it becomes the bind pose (the weights stay)',
+                icon: 'pin',
+                run: () => history.executeMutation(
+                    `Bind ${skeleton.name || 'the skeleton'} to the current pose`,
+                    () => SkinEdits.capture(skeleton, container, animations),
+                    () => SkinEdits.bindToCurrentPose(skeleton, container, animations),
+                    state => SkinEdits.restore(skeleton, animations, state, binding),
+                ),
+            }, {
+                label: 'Automatic weights',
+                title: 'Give every vertex the nearest bones of the bind pose (up to 4, by distance); IK and pole target bones are left out',
+                icon: 'wand',
+                run: () => history.executeMutation(
+                    `Automatic weights of ${skeleton.name || 'the skeleton'}`,
+                    () => SkinEdits.capture(skeleton, container, animations),
+                    () => SkinEdits.automaticWeights(skeleton, container, binding),
+                    state => SkinEdits.restore(skeleton, animations, state, binding),
+                ),
+            }, {
+                label: 'Rest from bind',
+                title: 'Make the bind pose of every bone (the pose the mesh is skinned in) its rest pose; the animations are not changed',
+                icon: 'person',
+                run: () => history.executeMutation(
+                    `Rest from bind of ${skeleton.name || 'the skeleton'}`,
+                    () => captureRestPose(skeleton),
+                    () => restFromBind(skeleton, animations, binding),
+                    state => restoreRestPose(skeleton, state),
+                ),
+            }, {
                 label: 'Scale…',
                 title: 'Scale the skeleton and the meshes it deforms uniformly, baked into the bones, the animations and the vertices',
                 icon: 'screen-full',
@@ -1096,10 +1225,50 @@ export class ModelProperties {
                     isActive: row => highlighter.isBoneHidden(bones[row]),
                     run: row => highlighter.setBoneHidden(bones[row], !highlighter.isBoneHidden(bones[row])),
                 },
+                // Right click on a bone: its commands
+                rowMenu: row => ModelProperties._boneMenu(bones[row], { history, highlighter, promptText, deleteBone }),
                 onSelectRow: row => highlighter.selectBone(bones[row] ?? null),
                 rowOf: object => bones.indexOf(object),
             },
         };
+    }
+
+    /**
+     * The commands of a bone of the bone table (its context menu).
+     * @param {BABYLON.Bone} bone
+     * @param {Pick<PropertiesContext, 'history' | 'highlighter' | 'promptText' | 'deleteBone'>} context
+     * @returns {import('./PropertyPanel').PanelAction[]}
+     */
+    static _boneMenu(bone, { history, highlighter, promptText, deleteBone }) {
+        if (!bone) return [];
+        const hidden = highlighter.isBoneHidden(bone);
+        return [{
+            label: 'Rename…',
+            title: 'Rename the bone (and its linked node)',
+            icon: 'edit',
+            run: async () => {
+                const name = (await promptText('Rename bone', 'Name', bone.name))?.trim();
+                if (!name || name === bone.name) return;
+                const rename = (value) => {
+                    bone.name = value;
+                    const node = bone.getTransformNode();
+                    if (node) node.name = value;
+                };
+                history.executeMutation(`Rename bone ${bone.name}`, () => bone.name, () => rename(name), rename);
+            },
+        }, {
+            label: hidden ? 'Show in the 3D view' : 'Hide in the 3D view',
+            title: hidden ? 'Show the bone in the 3D view' : 'Hide the bone in the 3D view (the file is not changed)',
+            icon: hidden ? 'eye' : 'eye-closed',
+            transient: true,
+            run: () => highlighter.setBoneHidden(bone, !hidden),
+        }, {
+            label: 'Delete bone',
+            title: 'Delete the bone: its child bones and nodes hang from its parent, its weights go to its parent, its animations are removed (one undo step)',
+            icon: 'trash',
+            isDisabled: () => !deleteBone || bone.getSkeleton().bones.length < 2,
+            run: () => deleteBone?.(bone),
+        }];
     }
 
     /**

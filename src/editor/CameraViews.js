@@ -1,6 +1,6 @@
 import * as BABYLON from '@babylonjs/core';
 import { BONES_LAYER, MODEL_LAYER } from './SkeletonView';
-import { VERTICES_LAYER } from './ViewRendering';
+import { BONE_AXES_LAYER, NORMALS_LAYER, VERTICES_LAYER } from './ViewRendering';
 
 /**
  * A layout of the desktop view: the side of the inspector and the number of camera views.
@@ -19,9 +19,10 @@ import { VERTICES_LAYER } from './ViewRendering';
 
 /**
  * What a camera shows in a view, set from the view bar while its view is selected: the render
- * mode, the vertices (points over any mode) and, in skeleton mode, the meshes and the bones. The
+ * mode, the vertices (points over any mode), the normals of the vertices, the axes of the bones
+ * and, in skeleton mode, the meshes and the bones. The
  * settings belong to the camera: they move with it to another view.
- * @typedef {{ renderMode: import('./Toolbar').RenderMode, vertices?: boolean, display: import('./SelectionHighlighter').SkeletonDisplay }} ViewSettings
+ * @typedef {{ renderMode: import('./Toolbar').RenderMode, vertices?: boolean, normals?: boolean, boneAxes?: boolean, display: import('./SelectionHighlighter').SkeletonDisplay }} ViewSettings
  */
 
 /**
@@ -140,10 +141,11 @@ export class CameraViews {
      * @param {(settings: ViewSettings) => void} options.onBeforeView a view is about to be rendered
      *   (its global render settings are applied)
      * @param {() => void} options.onAfterView a view was rendered (its render settings are undone)
-     * @param {(needed: boolean) => void} options.onVerticesNeeded whether a shown view shows the vertices
+     * @param {(needs: { vertices: boolean, normals: boolean, boneAxes: boolean }) => void} options.onOverlaysNeeded
+     *   what the shown views show over the model (the helpers are made only then)
      * @param {CameraViewsState} [options.state]
      */
-    constructor({ scene, viewport, previews, onTagClick, onChange, defaults, isSkeletonMode, onSelect, onBeforeView, onAfterView, onVerticesNeeded, state }) {
+    constructor({ scene, viewport, previews, onTagClick, onChange, defaults, isSkeletonMode, onSelect, onBeforeView, onAfterView, onOverlaysNeeded, state }) {
         this._scene = scene;
         this._viewport = viewport;
         this._previews = previews;
@@ -152,7 +154,7 @@ export class CameraViews {
         this._defaults = defaults;
         this._isSkeletonMode = isSkeletonMode;
         this._onSelect = onSelect;
-        this._onVerticesNeeded = onVerticesNeeded;
+        this._onOverlaysNeeded = onOverlaysNeeded;
         /** @type {Record<string, ViewSettings>} settings of each camera, by ref */
         this._settings = state?.settings && typeof state.settings === 'object' ? { ...state.settings } : {};
         /** The view the view bar shows and acts on (selected by a click) */
@@ -248,21 +250,23 @@ export class CameraViews {
 
     /**
      * Each camera shows the model meshes and the bones as its view says (in skeleton mode; else
-     * everything), and the vertices of the shown meshes when its view shows them: the layer mask of
-     * the camera.
+     * everything), the vertices and normals of the shown meshes and the axes of the bones when its
+     * view shows them: the layer mask of the camera.
      */
     applyMasks() {
         const skeletonMode = this._isSkeletonMode();
-        let vertices = false;
+        const needs = { vertices: false, normals: false, boneAxes: false };
         this._shown.forEach((camera, index) => {
             if (!camera) return;
-            const { display, vertices: showVertices } = this.settingsOf(index);
+            const { display, vertices, normals, boneAxes } = this.settingsOf(index);
             const mesh = !skeletonMode || display.mesh;
             camera.layerMask = (mesh ? MODEL_LAYER : 0) | (!skeletonMode || display.bones ? BONES_LAYER : 0)
-                | (mesh && showVertices ? VERTICES_LAYER : 0);
-            vertices ||= mesh && !!showVertices;
+                | (mesh && vertices ? VERTICES_LAYER : 0) | (mesh && normals ? NORMALS_LAYER : 0) | (boneAxes ? BONE_AXES_LAYER : 0);
+            needs.vertices ||= mesh && !!vertices;
+            needs.normals ||= mesh && !!normals;
+            needs.boneAxes ||= !!boneAxes;
         });
-        this._onVerticesNeeded(vertices);
+        this._onOverlaysNeeded(needs);
     }
 
     /** @returns {number} the view with the mouse controls */
