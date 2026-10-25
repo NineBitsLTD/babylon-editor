@@ -210,10 +210,13 @@ export class BabylonJsonBinding {
         this._bindDocument(json);
         this._bindMeshes(json, container);
         this._bindMaterials(json, container);
-        // Multi-materials are not edited, but meshes refer to them by uniqueId too
-        (json.multiMaterials ?? []).forEach((source) => {
+        // Multi-materials: their place (tree commands) and name; meshes refer to them by uniqueId too
+        (json.multiMaterials ?? []).forEach((source, index) => {
             const multi = container.multiMaterials?.find(candidate => candidate.id === source.id);
-            if (multi && Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(multi, Number(source.uniqueId));
+            if (!multi) return;
+            this._paths.set(multi, ['multiMaterials', index]);
+            this._bind(['multiMaterials', index, 'name'], () => multi.name, (value) => { multi.name = value; });
+            if (Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(multi, Number(source.uniqueId));
         });
         this._bindSkeletons(json, container);
         this._bindAnimationGroups(json, container);

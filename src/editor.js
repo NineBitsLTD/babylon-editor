@@ -21,6 +21,7 @@ import { ModelProperties } from './editor/ModelProperties';
 import { ModelSerializer } from './editor/ModelSerializer';
 import { PropertyPanel } from './editor/PropertyPanel';
 import { SelectionHighlighter } from './editor/SelectionHighlighter';
+import { MODEL_LAYER } from './editor/SkeletonView';
 import { TextureImage } from './editor/TextureImage';
 import { TransformEditing } from './editor/TransformEditing';
 import { ViewRendering } from './editor/ViewRendering';
@@ -235,7 +236,8 @@ class Editor {
         this._syncViewBar();
         this._localAxes = !!vscode.getState()?.localAxes;
         this._transform.setLocal(this._localAxes);
-        this._setCursor(vscode.getState()?.cursor ?? 'view', vscode.getState()?.tool ?? 'move');
+        // The select mode of earlier versions is the edit mode now
+        this._setCursor(vscode.getState()?.cursor === 'view' || !vscode.getState()?.cursor ? 'view' : 'edit', vscode.getState()?.tool ?? 'move');
         this._edits = new ModelEdits({
             scene: this._scene,
             container: () => this._container,
@@ -535,8 +537,10 @@ class Editor {
 
     /**
      * A click (not a camera drag) in the 3D view: on a bone selects it (a click on the selected bone
-     * deselects it), else, while the inspector shows a mesh, on a vertex of it selects that vertex in
-     * its vertex table. Shift+click adds the bone / vertex to the selection of the table or takes it out.
+     * deselects it), else on a vertex of the mesh the inspector shows selects that vertex in its
+     * vertex table; a vertex of another mesh (in the edit mode or while the view shows the vertices)
+     * opens that mesh with it selected. Shift+click adds the bone / vertex to the selection of the
+     * table or takes it out; without a bone table the skeleton inspector opens with the bones.
      */
     _listenBonePicks() {
         this._scene.onPointerObservable.add((info) => {
@@ -554,16 +558,28 @@ class Editor {
                     this._panel.selectObjects([bone], 'remove');
                     return;
                 }
-                if (mode === 'add' && this._panel.revealObject(bone, true)) return;
+                if (mode === 'add') {
+                    if (this._panel.revealObject(bone, true)) return;
+                    // No bone table (a mesh, a node, a bone inspector): the skeleton inspector selects them
+                    const shown = this._selection?.data.kind === 'bone' ? this._selection.data.bone : null;
+                    this._selectBones(shown && shown !== bone && shown.getSkeleton() === bone.getSkeleton() ? [shown, bone] : [bone], 'add');
+                    return;
+                }
                 this._revealBone(bone);
                 return;
             }
+            const occluders = this._vertexOccluders();
             const mesh = this._selectedMesh();
-            if (!mesh) return;
-            const vertex = this._highlighter.pickVertex(mesh, x, y, this._vertexOccluders());
-            if (vertex < 0) return;
-            if (mode === 'remove') this._panel.selectObjects([{ vertex }], 'remove');
-            else this._panel.revealObject({ vertex }, mode === 'add');
+            const vertex = mesh ? this._highlighter.pickVertex(mesh, x, y, occluders) : -1;
+            if (vertex >= 0) {
+                if (mode === 'remove') this._panel.selectObjects([{ vertex }], 'remove');
+                else this._panel.revealObject({ vertex }, mode === 'add');
+                return;
+            }
+            // A vertex of another mesh opens that mesh with it selected (in the edit mode or while the view shows the vertices)
+            if (mode === 'remove' || !(this._cursor === 'edit' || this._selectedViewSettings().vertices)) return;
+            const found = this._highlighter.pickVertexIn(this._pickableMeshes(), x, y, occluders);
+            if (found) this._openWithSelection({ kind: 'node', node: found.mesh }, [{ vertex: found.vertex }]);
         });
     }
 
@@ -574,19 +590,19 @@ class Editor {
     }
 
     /**
-     * What the left button does in the 3D view: turns the camera (view), selects (select) or selects
-     * and moves the selection with the gizmo of the tool (edit); the camera turns with the middle
-     * button but in the view mode. Kept in the webview state.
+     * What the left button does in the 3D view: turns the camera (view) or selects and moves the
+     * selection with the gizmo of the tool (edit); the camera turns with the middle button but in
+     * the view mode. Kept in the webview state.
      * @param {import('./editor/Toolbar').CursorMode} mode
      * @param {import('./editor/TransformEditing').TransformTool} tool
      */
     _setCursor(mode, tool) {
         this._cursor = mode;
         this._tool = tool;
-        const selecting = mode !== 'view';
-        this._boxSelection.enabled = selecting;
-        this._cameraViews.setSelectMode(selecting);
-        this._transform.setTool(mode === 'edit' ? tool : null);
+        const editing = mode === 'edit';
+        this._boxSelection.enabled = editing;
+        this._cameraViews.setSelectMode(editing);
+        this._transform.setTool(editing ? tool : null);
         this._toolbar.setCursor(mode, tool, this._localAxes);
         vscode.setState({ ...vscode.getState(), cursor: mode, tool });
     }
@@ -601,13 +617,13 @@ class Editor {
         vscode.setState({ ...vscode.getState(), localAxes: local });
     }
 
-    /** V: view, Q: select, W / E / R: move / rotate / scale in the edit mode, X: local / world axes (not while typing). */
+    /** V: view, W / E / R: move / rotate / scale in the edit mode, X: local / world axes (not while typing). */
     _listenCursorKeys() {
         window.addEventListener('keydown', (event) => {
             if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
             const target = /** @type {HTMLElement} */ (event.target);
             if (target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
-            const keys = { v: ['view', this._tool], q: ['select', this._tool], w: ['edit', 'move'], e: ['edit', 'rotate'], r: ['edit', 'scale'] };
+            const keys = { v: ['view', this._tool], w: ['edit', 'move'], e: ['edit', 'rotate'], r: ['edit', 'scale'] };
             if (event.key.toLowerCase() === 'x' && this._cursor === 'edit') {
                 this._setLocalAxes(!this._localAxes);
                 event.preventDefault();
@@ -650,12 +666,35 @@ class Editor {
         if (showsBones) {
             const mesh = this._container?.meshes.find(candidate => candidate.skeleton === skeleton) ?? null;
             const bones = ScreenSelection.bonesInRect(this._scene, skeleton, mesh, rect).filter(bone => !this._highlighter.isBoneHidden(bone));
-            if (this._panel.selectObjects(bones, mode)) return;
+            if (this._selectBones(bones, mode)) return;
         }
+        const occluders = this._vertexOccluders();
         const mesh = this._selectedMesh();
-        if (!mesh) return;
-        const vertices = ScreenSelection.verticesInRect(this._scene, mesh, rect, this._vertexOccluders());
-        this._panel.selectObjects(vertices.map(vertex => ({ vertex })), mode);
+        const vertices = mesh ? ScreenSelection.verticesInRect(this._scene, mesh, rect, occluders) : [];
+        if (mesh && (vertices.length || mode !== 'replace')) {
+            this._panel.selectObjects(vertices.map(vertex => ({ vertex })), mode);
+            return;
+        }
+        if (mode === 'remove') return;
+        // No mesh shown, or none of its vertices inside: the mesh with the most vertices inside opens with them selected
+        let best = null;
+        for (const candidate of this._pickableMeshes()) {
+            if (candidate === mesh) continue;
+            const inside = ScreenSelection.verticesInRect(this._scene, candidate, rect, occluders);
+            if (inside.length > (best?.vertices.length ?? 0)) best = { mesh: candidate, vertices: inside };
+        }
+        if (best) this._openWithSelection({ kind: 'node', node: best.mesh }, best.vertices.map(vertex => ({ vertex })));
+        else if (mesh) this._panel.selectObjects([], mode);
+    }
+
+    /**
+     * @returns {BABYLON.Mesh[]} the model meshes whose vertices can be picked in the view under the
+     *   pointer: drawn by its camera (not hidden in the view or by the skeleton mode), with vertices
+     */
+    _pickableMeshes() {
+        const camera = this._scene.cameraToUseForPointers ?? this._scene.activeCamera;
+        return (this._container?.meshes ?? []).filter(mesh => mesh instanceof BABYLON.Mesh && mesh.isEnabled() && mesh.isVisible
+            && mesh.getTotalVertices() > 0 && (mesh.layerMask & (camera?.layerMask ?? MODEL_LAYER)) !== 0);
     }
 
     /**
@@ -665,6 +704,35 @@ class Editor {
     _vertexOccluders() {
         if (this._selectedViewSettings().renderMode === 'wireframe') return null;
         return (this._container?.meshes ?? []).filter(candidate => candidate.isEnabled() && candidate.isVisible && candidate.layerMask !== 0 && candidate.getTotalVertices() > 0);
+    }
+
+    /**
+     * Selects bones picked in the 3D view (Shift+click, a selection rectangle) in the bone table of
+     * the inspector; without one (a mesh, a node, a bone is shown) the skeleton inspector of the
+     * bones opens with them selected.
+     * @param {BABYLON.Bone[]} bones of one skeleton
+     * @param {import('./editor/BoxSelection').SelectionMode} mode
+     * @returns {boolean} whether a bone table took them (false: no table and no bones to open one with)
+     */
+    _selectBones(bones, mode) {
+        if (this._panel.selectObjects(bones, mode)) return true;
+        if (mode === 'remove' || !bones.length) return false;
+        this._openWithSelection({ kind: 'skeleton', skeleton: bones[0].getSkeleton() }, bones);
+        return true;
+    }
+
+    /**
+     * Opens an object in the inspector (in place of a bone inspector, else with the way back to the
+     * shown one) and selects records of its table (bones of a skeleton, vertices of a mesh).
+     * @param {import('./editor/ModelOutline').ModelItemData} data
+     * @param {any[]} objects as the table's `rowOf` takes them
+     */
+    _openWithSelection(data, objects) {
+        vscode.postMessage({ type: 'treeDeselected' });
+        const item = { id: this._inspectorObjectId(data), label: () => objectOf(data).name, data };
+        if (this._selection?.data.kind === 'bone') this._show(item);
+        else this._select(item, this._selection);
+        this._panel.selectObjects(objects, 'replace');
     }
 
     /**
@@ -1086,20 +1154,33 @@ class Editor {
                 return input === null ? null : Number(input.trim().replace(',', '.'));
             },
             promptText: (title, prompt, value) => this._host.request('inputBox', { title, prompt, value }),
-            weldVertices: this._canEdit ? async (mesh) => {
+            weldVertices: this._canEdit ? async (meshes, name) => {
                 const input = await this._host.request('inputBox', {
-                    title: `Weld the vertices of ${mesh.name}`,
-                    prompt: 'Points no farther apart than this distance become one point (in the coordinates of the vertex table of the mesh); 0 welds only points at the same position',
+                    title: `Weld the vertices of ${name}`,
+                    prompt: `Points no farther apart than this distance become one point (in the coordinates of the vertex table of ${meshes.length > 1 ? 'each mesh' : 'the mesh'}); 0 welds only points at the same position`,
                     value: '0',
                     nonNegativeNumber: true,
                 });
                 if (input === null) return;
                 try {
-                    this._host.send('showMessage', { level: 'info', text: this._edits.weldVertices(mesh, Number(input.trim().replace(',', '.'))) });
+                    const distance = Number(input.trim().replace(',', '.'));
+                    const text = meshes.length === 1 ? this._edits.weldVertices(meshes[0], distance) : this._edits.weldMeshes(meshes, distance, name);
+                    this._host.send('showMessage', { level: 'info', text });
                 } catch (error) {
                     this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });
                 }
             } : null,
+            removeHidden: this._canEdit ? async (meshes, name) => {
+                const input = await this._host.request('inputBox', {
+                    title: `Remove the hidden geometry of ${name}`,
+                    prompt: 'Grid cells along the longest side of each mesh: openings narrower than about two cells count as closed; more cells are finer and slower (at most 256)',
+                    value: '256',
+                    positiveNumber: true,
+                });
+                if (input === null) return;
+                this._report(() => this._edits.removeHidden(meshes, Number(input.trim().replace(',', '.')), name));
+            } : null,
+            mergeMeshes: this._binding && this._canEdit ? (meshes, name) => this._report(() => this._edits.mergeMeshes(meshes, name)) : null,
             deleteVertices: this._canEdit ? (mesh, vertices) => this._report(() => this._edits.deleteVertices(mesh, vertices)) : null,
             mergeVertices: this._canEdit ? (mesh, vertices) => this._report(() => this._edits.mergeVertices(mesh, vertices)) : null,
             deleteBones: this._binding && this._canEdit ? (bones) => {

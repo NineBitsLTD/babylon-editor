@@ -49,13 +49,13 @@ export function drawnVertexPosition(mesh, index, result) {
 }
 
 /**
- * How much the world matrix and the skin enlarge a mesh as it is drawn (a model scaled by its
- * node or its bones, e.g. ×100 from FBX): the diagonal of the drawn vertices over that of the
- * vertex data.
+ * The size of a mesh as it is drawn and how much the world matrix and the skin enlarge it (a model
+ * scaled by its node or its bones, e.g. ×100 from FBX): the diagonal of the drawn vertices, and it
+ * over that of the vertex data.
  * @param {BABYLON.AbstractMesh} mesh
- * @returns {number} 1 when it cannot be told
+ * @returns {{ diagonal: number, scale: number }} 0 and 1 when they cannot be told
  */
-function drawnScale(mesh) {
+function drawnSize(mesh) {
     const diagonal = (positions) => {
         const min = [Infinity, Infinity, Infinity];
         const max = [-Infinity, -Infinity, -Infinity];
@@ -67,9 +67,10 @@ function drawnScale(mesh) {
     };
     const local = mesh.getVerticesData(K.PositionKind);
     const drawn = ScreenSelection.drawnPositions(mesh);
-    if (!local?.length || !drawn) return 1;
-    const scale = diagonal(drawn) / diagonal(local);
-    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+    if (!local?.length || !drawn) return { diagonal: 0, scale: 1 };
+    const drawnDiagonal = diagonal(drawn);
+    const scale = drawnDiagonal / diagonal(local);
+    return { diagonal: Number.isFinite(drawnDiagonal) ? drawnDiagonal : 0, scale: Number.isFinite(scale) && scale > 0 ? scale : 1 };
 }
 
 /**
@@ -151,13 +152,14 @@ export class SelectionHighlighter {
      */
     outlineMeshes(meshes) {
         this.clear();
-        const width = this._sceneRadius() * 0.004;
-        for (const mesh of meshes) {
-            if (!mesh.getTotalVertices?.()) continue;
+        const outlined = meshes.filter(mesh => mesh.getTotalVertices?.()).map(mesh => ({ mesh, ...drawnSize(mesh) }));
+        // The bounds of skinned meshes are not posed right after a load: the drawn size of the meshes counts too
+        const radius = Math.max(this._sceneRadius(), ...outlined.map(({ diagonal }) => diagonal / 2));
+        for (const { mesh, scale } of outlined) {
             mesh.renderOutline = true;
             mesh.outlineColor = OUTLINE_COLOR;
             // Babylon moves the vertices by the width before the world and the skin matrices scale them
-            mesh.outlineWidth = width / drawnScale(mesh);
+            mesh.outlineWidth = radius * 0.004 / scale;
             this._outlined.push(mesh);
         }
     }
@@ -226,6 +228,18 @@ export class SelectionHighlighter {
      */
     pickVertex(mesh, x, y, occluders) {
         return mesh.isEnabled() ? ScreenSelection.nearestVertex(this._scene, mesh, x, y, PICK_RADIUS, occluders) : -1;
+    }
+
+    /**
+     * The vertex drawn nearest to a screen point among several meshes (as pickVertex).
+     * @param {BABYLON.AbstractMesh[]} meshes
+     * @param {number} x canvas x
+     * @param {number} y canvas y
+     * @param {BABYLON.AbstractMesh[] | null} occluders
+     * @returns {{ mesh: BABYLON.AbstractMesh, vertex: number } | null}
+     */
+    pickVertexIn(meshes, x, y, occluders) {
+        return ScreenSelection.nearestVertexIn(this._scene, meshes.filter(mesh => mesh.isEnabled()), x, y, PICK_RADIUS, occluders);
     }
 
     /**

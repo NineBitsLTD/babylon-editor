@@ -462,14 +462,21 @@ export class BabylonTextEditor {
         const { document } = session;
         this._lastText = document.getText();
         const edit = new vscode.WorkspaceEdit();
-        for (const op of BabylonTextEditor._mergeInserts(ops)) {
-            const change = op.op === 'set' ? this._textChange(index, op) : op.op === 'insert' ? this._insertChange(index, op) : this._removeChange(index, op);
+        const merged = BabylonTextEditor._mergeInserts(ops);
+        const removals = this._removeChanges(index, merged.filter(op => op.op === 'remove'));
+        if (!removals) {
+            vscode.window.showErrorMessage(`${label} was not written: a removed object has no place in the text`);
+            return;
+        }
+        for (const op of merged.filter(op => op.op !== 'remove')) {
+            const change = op.op === 'set' ? this._textChange(index, op) : this._insertChange(index, op);
             if (!change) {
                 vscode.window.showErrorMessage(`${label} was not written: ${(op.path ?? op.arrayPath).join('.')} has no place in the text`);
                 return;
             }
             edit.replace(document.uri, new vscode.Range(document.positionAt(change.start), document.positionAt(change.end)), change.text);
         }
+        for (const change of removals) edit.replace(document.uri, new vscode.Range(document.positionAt(change.start), document.positionAt(change.end)), '');
         session.structural = true;
         try {
             await vscode.workspace.applyEdit(edit);
@@ -520,19 +527,35 @@ export class BabylonTextEditor {
     }
 
     /**
-     * Removes an item of an array with the separator next to it.
+     * The text ranges that remove items of arrays with the separators next to them; items of one
+     * array are removed together, so the ranges do not overlap (each item up to the next one, a
+     * run of removed items at the end from the end of the item before it).
      * @param {import('../utils/JsonIndex').JsonIndex} index
-     * @param {{ path: (string | number)[] }} op
-     * @returns {{ start: number, end: number, text: string } | null}
+     * @param {{ path: (string | number)[] }[]} ops
+     * @returns {{ start: number, end: number }[] | null} null when an item cannot be located
      */
-    _removeChange(index, { path }) {
-        const node = index.find(path);
-        if (!node?.parent) return null;
-        const siblings = node.parent.children;
-        const position = siblings.indexOf(node);
-        if (position < siblings.length - 1) return { start: node.start, end: siblings[position + 1].start, text: '' };
-        if (position > 0) return { start: siblings[position - 1].end, end: node.end, text: '' };
-        return { start: node.start, end: node.end, text: '' };
+    _removeChanges(index, ops) {
+        const byParent = new Map();
+        for (const { path } of ops) {
+            const node = index.find(path);
+            if (!node?.parent) return null;
+            if (!byParent.has(node.parent)) byParent.set(node.parent, new Set());
+            byParent.get(node.parent).add(node.parent.children.indexOf(node));
+        }
+        const changes = [];
+        byParent.forEach((removed, parent) => {
+            const siblings = parent.children;
+            // The run of removed items at the end of the array
+            let tail = siblings.length;
+            while (tail > 0 && removed.has(tail - 1)) tail--;
+            removed.forEach((position) => {
+                if (position < tail) changes.push({ start: siblings[position].start, end: siblings[position + 1].start });
+            });
+            if (tail < siblings.length) {
+                changes.push({ start: tail > 0 ? siblings[tail - 1].end : siblings[tail].start, end: siblings[siblings.length - 1].end });
+            }
+        });
+        return changes;
     }
 
     /**

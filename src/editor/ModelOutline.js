@@ -143,7 +143,7 @@ export class ModelOutline {
         const allowed = formatSections ? [...formatSections, 'Cameras'] : formatSections;
         const sections = [
             outline._section('Nodes', 'package', () => outline._nodeItems(outline._rootNodes())),
-            outline._section('Materials', 'symbol-color', () => container.materials.map(material => outline._materialItem(material))),
+            outline._section('Materials', 'symbol-color', () => [...container.materials, ...(container.multiMaterials ?? [])].map(material => outline._materialItem(material))),
             outline._section('Textures', 'file-media', () => container.textures.map(texture => outline._textureItem(texture))),
             outline._section('Skeletons', 'person', () => container.skeletons.map(skeleton => outline._skeletonItem(skeleton))),
             outline._section('Animations', 'play-circle', () => [
@@ -231,7 +231,7 @@ export class ModelOutline {
         return {
             id: this._id('material'),
             label: () => material.name || '(unnamed)',
-            icon: 'symbol-color',
+            icon: material instanceof BABYLON.MultiMaterial ? 'layers' : 'symbol-color',
             description: () => material.getClassName(),
             data: { kind: 'material', material },
         };

@@ -216,6 +216,111 @@ export class MeshWeld {
     }
 
     /**
+     * Removes triangles, and the vertices no other triangle uses (also those no triangle used
+     * before); the other vertices keep all their data.
+     * @param {BABYLON.Mesh} mesh
+     * @param {ArrayLike<number>} removed 1 for every triangle to remove (in the order of the indices)
+     * @returns {WeldedMesh}
+     */
+    static removeTriangles(mesh, removed) {
+        const indices = mesh.getIndices() ?? [];
+        const count = mesh.getTotalVertices();
+        const used = new Uint8Array(count);
+        for (let corner = 0; corner < indices.length; corner++) {
+            if (!removed[Math.floor(corner / 3)]) used[indices[corner]] = 1;
+        }
+        const kept = [];
+        const newIndexOf = new Int32Array(count).fill(-1);
+        for (let vertex = 0; vertex < count; vertex++) {
+            if (!used[vertex]) continue;
+            newIndexOf[vertex] = kept.length;
+            kept.push(vertex);
+        }
+        return MeshWeld._rebuild(mesh, kept, newIndexOf, null, corner => !removed[corner / 3]);
+    }
+
+    /**
+     * Joins meshes into the geometry of the first one: the vertices of the others moved into its
+     * space (normals turned with them, triangles turned back in a mirrored space), the vertex buffers
+     * of all (missing values: colors white, others 0; tangents dropped), the triangles grouped into
+     * one sub-mesh per material (a multi-material is split into its materials).
+     * @param {BABYLON.Mesh[]} meshes at least two; skinned meshes must share the skeleton and the space
+     * @returns {WeldedMesh & { materials: (BABYLON.Material | null)[] }} sub-mesh material indices refer to `materials`
+     * @throws when the meshes cannot be joined (morph targets, instances, other skeletons or spaces)
+     */
+    static mergeMeshes(meshes) {
+        const [first] = meshes;
+        const toFirst = BABYLON.Matrix.Invert(first.computeWorldMatrix(true));
+        const skeletons = new Set(meshes.map(mesh => mesh.skeleton ?? null));
+        if (skeletons.size > 1) throw new Error('The meshes are deformed by different skeletons (or some by none)');
+        for (const mesh of meshes) {
+            if (mesh.morphTargetManager?.numTargets) throw new Error(`${mesh.name} has morph targets: they cannot be merged`);
+            if (mesh !== first && mesh.instances?.length) throw new Error(`${mesh.name} has instances`);
+            if (!mesh.getIndices()?.length || !mesh.getVerticesData(K.PositionKind)) throw new Error(`${mesh.name} has no triangles`);
+        }
+        const transforms = meshes.map(mesh => mesh.computeWorldMatrix(true).multiply(toFirst));
+        // A skinned vertex is placed by the bones: its mesh cannot move into another space
+        if (first.skeleton && transforms.some(transform => !transform.equalsWithEpsilon(BABYLON.Matrix.IdentityReadOnly, 1e-5))) {
+            throw new Error('The skinned meshes are not in one space (their nodes are transformed differently)');
+        }
+        const kinds = [...new Set(meshes.flatMap(mesh => meshKinds(mesh)))].filter(kind => kind !== K.TangentKind);
+        const strides = new Map(kinds.map(kind => [kind, Math.max(...meshes.map(mesh => (mesh.isVerticesDataPresent(kind) ? mesh.getVertexBuffer(kind)?.getSize() ?? K.DeduceStride(kind) : 0)))]));
+        const vertexCount = meshes.reduce((sum, mesh) => sum + mesh.getTotalVertices(), 0);
+        const data = new Map(kinds.map(kind => [kind, new Float32Array(vertexCount * strides.get(kind)).fill(kind === K.ColorKind ? 1 : 0)]));
+        const materials = [];
+        const trianglesOf = [];
+        const point = new BABYLON.Vector3();
+        let offset = 0;
+        meshes.forEach((mesh, meshIndex) => {
+            const count = mesh.getTotalVertices();
+            const transform = transforms[meshIndex];
+            const normalMatrix = BABYLON.Matrix.Invert(transform).transpose();
+            for (const kind of kinds) {
+                const values = mesh.getVerticesData(kind);
+                if (!values) continue;
+                const stride = values.length / count;
+                const target = data.get(kind);
+                const targetStride = strides.get(kind);
+                for (let vertex = 0; vertex < count; vertex++) {
+                    for (let component = 0; component < stride; component++) target[(offset + vertex) * targetStride + component] = values[vertex * stride + component];
+                }
+                if (kind === K.PositionKind || kind === K.NormalKind) {
+                    for (let vertex = offset; vertex < offset + count; vertex++) {
+                        point.fromArray(target, vertex * 3);
+                        if (kind === K.PositionKind) BABYLON.Vector3.TransformCoordinatesToRef(point, transform, point);
+                        else BABYLON.Vector3.TransformNormalToRef(point, normalMatrix, point).normalize();
+                        point.toArray(target, vertex * 3);
+                    }
+                }
+            }
+            const indices = mesh.getIndices();
+            const flip = transform.determinant() < 0;
+            const subMeshes = mesh.subMeshes?.length ? mesh.subMeshes : [{ materialIndex: 0, indexStart: 0, indexCount: indices.length }];
+            for (const subMesh of subMeshes) {
+                const material = mesh.material instanceof BABYLON.MultiMaterial ? mesh.material.subMaterials[subMesh.materialIndex] ?? null : mesh.material ?? null;
+                if (!materials.includes(material)) {
+                    materials.push(material);
+                    trianglesOf.push([]);
+                }
+                const triangles = trianglesOf[materials.indexOf(material)];
+                for (let corner = subMesh.indexStart; corner < subMesh.indexStart + subMesh.indexCount; corner += 3) {
+                    const a = indices[corner] + offset, b = indices[corner + 1] + offset, c = indices[corner + 2] + offset;
+                    if (flip) triangles.push(a, c, b);
+                    else triangles.push(a, b, c);
+                }
+            }
+            offset += count;
+        });
+        const indices = [];
+        const subMeshes = trianglesOf.map((triangles, materialIndex) => {
+            const indexStart = indices.length;
+            for (const index of triangles) indices.push(index);
+            return { materialIndex, indexStart, indexCount: triangles.length };
+        });
+        return { data, indices, subMeshes, vertexCount, removed: 0, targets: [], materials };
+    }
+
+    /**
      * Merges vertices into one at their centre (a vertex of the first one, with the average normal;
      * morph targets move it to the centre of their positions); triangles that become degenerate are dropped.
      * @param {BABYLON.Mesh} mesh
@@ -245,9 +350,10 @@ export class MeshWeld {
      * @param {number[]} kept the old vertex of every new one
      * @param {Int32Array} newIndexOf the new vertex of every old one (-1: removed with its triangles)
      * @param {{ at: number, vertices: number[] } | null} merge a new vertex that is the average of old ones
+     * @param {(corner: number) => boolean} [keepTriangle] whether the triangle at a first corner of the indices stays
      * @returns {WeldedMesh}
      */
-    static _rebuild(mesh, kept, newIndexOf, merge) {
+    static _rebuild(mesh, kept, newIndexOf, merge, keepTriangle = () => true) {
         const indices = mesh.getIndices() ?? [];
         const average = (values, stride) => {
             const sum = new Float32Array(stride);
@@ -278,7 +384,7 @@ export class MeshWeld {
             const indexStart = newIndices.length;
             for (let corner = subMesh.indexStart; corner < subMesh.indexStart + subMesh.indexCount; corner += 3) {
                 const a = newIndexOf[indices[corner]], b = newIndexOf[indices[corner + 1]], c = newIndexOf[indices[corner + 2]];
-                if (a < 0 || b < 0 || c < 0 || a === b || b === c || a === c) continue;
+                if (a < 0 || b < 0 || c < 0 || a === b || b === c || a === c || !keepTriangle(corner)) continue;
                 newIndices.push(a, b, c);
             }
             return { materialIndex: subMesh.materialIndex, indexStart, indexCount: newIndices.length - indexStart };

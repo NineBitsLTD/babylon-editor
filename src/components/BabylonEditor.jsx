@@ -507,10 +507,7 @@ export class BabylonEditor {
                             <button className="toolbar__button toolbar__cursor" data-cursor="view" title="View (V): the left button turns the camera">
                                 <i className="codicon codicon-eye"></i>
                             </button>
-                            <button className="toolbar__button toolbar__cursor" data-cursor="select" title="Select (Q): the left button selects vertices or bones, also in a rectangle (Shift adds, Option / Alt takes out); in every view; the middle button turns the camera">
-                                <i className="codicon codicon-inspect"></i>
-                            </button>
-                            <button className="toolbar__button toolbar__cursor" data-cursor="edit" title="Edit: select, then move, turn or scale the selected vertices or bones with the gizmo; in every view; the middle button turns the camera">
+                            <button className="toolbar__button toolbar__cursor" data-cursor="edit" title="Edit: the left button selects vertices or bones, also in a rectangle (Shift adds, Option / Alt takes out), and the gizmo of the tool moves, turns or scales them; in every view; the middle button turns the camera">
                                 <i className="codicon codicon-edit"></i>
                             </button>
                             <button className="toolbar__button toolbar__tool" data-tool="move" title="Move (W)">

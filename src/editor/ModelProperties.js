@@ -44,7 +44,11 @@ import { texturePreview } from './TextureImage';
  *   user for a number greater than 0 (null when cancelled)
  * @property {(title: string, prompt: string, value: string) => Promise<string | null>} promptText asks the
  *   user for a text (null when cancelled)
- * @property {((mesh: BABYLON.Mesh) => void) | null} weldVertices welds the vertices at one position
+ * @property {((meshes: BABYLON.Mesh[], name: string) => void) | null} weldVertices welds the vertices at one position
+ *   of meshes (a mesh, or the meshes below a node, named by it)
+ * @property {((meshes: BABYLON.Mesh[], name: string) => void) | null} removeHidden removes the triangles the outside
+ *   air never reaches (and the vertices left unused) of meshes
+ * @property {((meshes: BABYLON.Mesh[], name: string) => void) | null} mergeMeshes merges meshes into the first one
  *   of a mesh into one with smooth normals (null when the format cannot be edited)
  * @property {((mesh: BABYLON.Mesh, vertices: number[]) => void) | null} deleteVertices deletes vertices of a
  *   mesh and the triangles that use them (null when the format cannot be edited)
@@ -531,19 +535,76 @@ export class ModelProperties {
             properties: ModelProperties._nodeProperties(node, context),
             lists: ModelProperties._nodeLists(node, context),
         };
+        content.actions = [];
         // The vertex table of a mesh is part of its inspector
         if (node instanceof BABYLON.Mesh && node.getTotalVertices() > 0) {
             const vertices = ModelProperties._vertices(node, context);
             content.table = { ...vertices.table, title: 'Vertices', notice: vertices.notice };
-            content.actions = [{
+            content.actions.push({
                 label: 'Weld vertices',
                 title: 'Merge the vertices at one position into one (texture seams keep theirs) and give them smooth normals; one undo step',
                 icon: 'merge',
                 isDisabled: () => !context.weldVertices,
-                run: () => context.weldVertices?.(node),
-            }];
+                run: () => context.weldVertices?.([node], node.name),
+            }, {
+                label: 'Remove hidden geometry',
+                title: 'Remove the triangles inside the mesh that the outside air never reaches (walls inside the solid, shells inside shells, closed voids; a hole of any shape counts as outside) and the vertices no triangle uses; one undo step',
+                icon: 'eye-closed',
+                isDisabled: () => !context.removeHidden,
+                run: () => context.removeHidden?.([node], node.name),
+            });
+        }
+        // The meshes of the hierarchy: welded together as one undo step
+        const meshes = ModelProperties._meshesOf(node, context.container);
+        // One mesh below the node: its own actions, named by it
+        if (meshes.length === 1 && meshes[0] !== node) {
+            content.actions.push({
+                label: `Weld vertices of ${meshes[0].name}`,
+                title: 'Merge the vertices at one position into one (texture seams keep theirs) and give them smooth normals; one undo step',
+                icon: 'merge',
+                isDisabled: () => !context.weldVertices,
+                run: () => context.weldVertices?.(meshes, meshes[0].name),
+            }, {
+                label: `Remove hidden geometry of ${meshes[0].name}`,
+                title: 'Remove the triangles inside the mesh that the outside air never reaches and the vertices no triangle uses; one undo step',
+                icon: 'eye-closed',
+                isDisabled: () => !context.removeHidden,
+                run: () => context.removeHidden?.(meshes, meshes[0].name),
+            });
+        }
+        if (meshes.length > 1) {
+            content.actions.push({
+                label: `Weld vertices of ${meshes.length} meshes`,
+                title: `Weld the vertices of ${meshes.map(mesh => mesh.name).join(', ')} (this node and the meshes below it): the vertices at one position of each mesh become one (texture seams keep theirs), with smooth normals; one undo step`,
+                icon: 'merge',
+                isDisabled: () => !context.weldVertices,
+                run: () => context.weldVertices?.(meshes, node.name),
+            }, {
+                label: `Remove hidden geometry of ${meshes.length} meshes`,
+                title: 'Remove the triangles of each mesh that the outside air never reaches inside it, and the vertices no triangle uses; one undo step',
+                icon: 'eye-closed',
+                isDisabled: () => !context.removeHidden,
+                run: () => context.removeHidden?.(meshes, node.name),
+            }, {
+                label: `Merge ${meshes.length} meshes into one`,
+                title: `Merge ${meshes.map(mesh => mesh.name).join(', ')} into ${meshes[0].name} (one sub-mesh per material, a multi-material when there are several); one undo step${context.mergeMeshes ? '' : ' — .babylon documents only'}`,
+                icon: 'combine',
+                isDisabled: () => !context.mergeMeshes,
+                run: () => context.mergeMeshes?.(meshes, node.name),
+            });
         }
         return content;
+    }
+
+    /**
+     * @param {BABYLON.Node} node
+     * @param {BABYLON.AssetContainer} container
+     * @returns {BABYLON.Mesh[]} the node (when a mesh) and the meshes below it that have vertices
+     */
+    static _meshesOf(node, container) {
+        const own = new Set(container.meshes);
+        return [node, ...node.getDescendants(false, child => own.has(child))]
+            .filter(candidate => candidate instanceof BABYLON.Mesh && candidate.getTotalVertices() > 0);
     }
 
     /**
@@ -686,12 +747,16 @@ export class ModelProperties {
                 {
                     label: 'Material',
                     type: 'select',
+                    // Multi-materials too (one material per sub-mesh)
                     options: () => [
                         { value: '', label: '(none)' },
                         ...container.materials.map(material => ({ value: String(material.uniqueId), label: material.name || '(unnamed)' })),
+                        ...(container.multiMaterials ?? []).map(material => ({ value: String(material.uniqueId), label: `${material.name || '(unnamed)'} (multi)` })),
                     ],
                     get: () => String(node.material?.uniqueId ?? ''),
-                    set: (value) => { node.material = container.materials.find(material => String(material.uniqueId) === value) ?? null; },
+                    set: (value) => {
+                        node.material = [...container.materials, ...(container.multiMaterials ?? [])].find(material => String(material.uniqueId) === value) ?? null;
+                    },
                     action: openObjectAction('material', () => node.material, material => openObject({ kind: 'material', material })),
                 },
                 readonlyProperty('Vertices', () => node.getTotalVertices()),
@@ -884,6 +949,7 @@ export class ModelProperties {
      * @returns {PanelContent}
      */
     static _material(material, context) {
+        if (material instanceof BABYLON.MultiMaterial) return ModelProperties._multiMaterial(material, context);
         /** @type {PropertyDescriptor[]} */
         const properties = [
             textProperty(material, 'name'),
@@ -911,6 +977,26 @@ export class ModelProperties {
         }
         properties.push(...ModelProperties._textureSlotProperties(material, context));
         return { title: 'Material', subtitle: () => material.name, properties };
+    }
+
+    /**
+     * A multi-material: its materials in the order of the sub-meshes that use them (a sub-mesh
+     * takes the material at its material index), each with a button that opens it.
+     * @param {BABYLON.MultiMaterial} material
+     * @param {PropertiesContext} context
+     * @returns {PanelContent}
+     */
+    static _multiMaterial(material, { openObject }) {
+        /** @type {PropertyDescriptor[]} */
+        const properties = [
+            textProperty(material, 'name'),
+            readonlyProperty('Type', () => material.getClassName()),
+            ...material.subMaterials.map((subMaterial, index) => ({
+                ...readonlyProperty(`Material ${index}`, () => subMaterial?.name || '(none)'),
+                action: openObjectAction('material', () => subMaterial, chosen => openObject({ kind: 'material', material: chosen })),
+            })),
+        ];
+        return { title: 'Multi-material', subtitle: () => material.name, properties };
     }
 
     /**

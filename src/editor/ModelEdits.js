@@ -4,6 +4,7 @@ import { babylonJsonReplacer, float32, serializeKeys } from './BabylonJsonBindin
 import { modelKeys } from './AnimationController';
 import { ClipConverter, decomposeTransform } from './ClipConverter';
 import { BoneRemoval } from './BoneRemoval';
+import { HiddenGeometry } from './HiddenGeometry';
 import { MeshWeld, meshKinds, VERTEX_PROPERTIES } from './MeshWeld';
 import { ClipRetarget } from './ClipRetarget';
 import { ModelConverter } from './ModelConverter';
@@ -38,6 +39,12 @@ const COLLECTIONS = {
  * An object copied to the clipboard (the host keeps it there as JSON): a skeleton in the
  * `.babylon` format, a node with its hierarchy (`CopiedNodes`) or a clip (`CopiedClip`).
  * @typedef {{ kind: 'skeleton' | 'node' | 'clip', value: any }} ClipboardObject
+ */
+
+/**
+ * A new geometry of a mesh, ready to apply with others as one undo step: document ops of a
+ * `.babylon` text, or, in the scene, the state before (capture), how to write a state and the state after.
+ * @typedef {{ mesh: BABYLON.Mesh, ops?: any[], capture?: () => any, write?: (state: any) => void, after?: any }} GeometryChange
  */
 
 /**
@@ -327,6 +334,153 @@ export class ModelEdits {
     }
 
     /**
+     * Welds the vertices of several meshes (as weldVertices, each in its own coordinates; a geometry
+     * shared by several of them once) as one undo step. Meshes that cannot be written are left out.
+     * @param {BABYLON.Mesh[]} meshes
+     * @param {number} distance
+     * @param {string} name what the meshes are (the node above them), for the undo label
+     * @returns {string} what was done
+     */
+    weldMeshes(meshes, distance, name) {
+        const geometries = new Set();
+        const changes = [];
+        const skipped = [];
+        let vertices = 0;
+        let merged = 0;
+        for (const mesh of meshes) {
+            if (mesh.geometry && geometries.has(mesh.geometry)) continue;
+            if (mesh.geometry) geometries.add(mesh.geometry);
+            try {
+                const welded = MeshWeld.compute(mesh, { distance });
+                changes.push(this._geometryChange(mesh, welded));
+                vertices += welded.vertexCount;
+                merged += welded.removed;
+            } catch (error) {
+                skipped.push(`${mesh.name} (${error?.message || error})`);
+            }
+        }
+        if (!changes.length) throw new Error(`No mesh of ${name} could be welded${skipped.length ? `: ${skipped.join('; ')}` : ''}`);
+        this._applyGeometries(changes, `Weld ${name}`);
+        return `Welded ${changes.length} meshes of ${name}${distance > 0 ? ` (points within ${distance})` : ''}: ${vertices} vertices (${merged} merged), smooth normals`
+            + (skipped.length ? `. Left out: ${skipped.join('; ')}` : '');
+    }
+
+    /**
+     * Removes the triangles of meshes the outside air never reaches (`HiddenGeometry`: inside the
+     * mesh itself, in the positions of the file) and the vertices no triangle uses any more, as one
+     * undo step; a geometry shared by several meshes once. Meshes that cannot be written are left out.
+     * @param {BABYLON.Mesh[]} meshes
+     * @param {number} resolution cells of the grid along the longest side of each mesh
+     * @param {string} name what the meshes are (a mesh, or the node above them)
+     * @returns {string} what was done
+     */
+    removeHidden(meshes, resolution, name) {
+        const geometries = new Set();
+        const changes = [];
+        const skipped = [];
+        let triangles = 0;
+        let vertices = 0;
+        for (const mesh of meshes) {
+            if (mesh.geometry && geometries.has(mesh.geometry)) continue;
+            if (mesh.geometry) geometries.add(mesh.geometry);
+            const positions = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+            const indices = mesh.getIndices();
+            if (!positions || !indices?.length) continue;
+            try {
+                const hidden = HiddenGeometry.hiddenTriangles(positions, indices, resolution);
+                const removedTriangles = hidden.reduce((sum, value) => sum + value, 0);
+                const result = MeshWeld.removeTriangles(mesh, hidden);
+                if (!removedTriangles && !result.removed) continue;
+                if (result.indices.length === 0) throw new Error('every triangle is hidden: is the mesh inside out or very thin?');
+                changes.push(this._geometryChange(mesh, result));
+                triangles += removedTriangles;
+                vertices += result.removed;
+            } catch (error) {
+                skipped.push(`${mesh.name} (${error?.message || error})`);
+            }
+        }
+        const left = skipped.length ? `. Left out: ${skipped.join('; ')}` : '';
+        if (!changes.length) return `Nothing hidden in ${name}${left}`;
+        this._applyGeometries(changes, `Remove hidden geometry of ${name}`);
+        return `Removed ${triangles} hidden triangles and ${vertices} vertices from ${changes.length} mesh${changes.length > 1 ? 'es' : ''} of ${name}${left}`;
+    }
+
+    /**
+     * Merges meshes into the first one (`MeshWeld.mergeMeshes`: one sub-mesh per material, a
+     * multi-material when there are several) and removes the others, as one undo step of a
+     * `.babylon` document; the first mesh keeps its name, node, transform and skeleton.
+     * @param {BABYLON.Mesh[]} meshes at least two
+     * @param {string} name the node above them, for the undo label
+     * @returns {string} what was done
+     */
+    mergeMeshes(meshes, name) {
+        const binding = this._binding();
+        if (!binding) throw new Error('Meshes are merged in .babylon documents only');
+        const [first, ...others] = meshes;
+        const meshSet = new Set(meshes);
+        for (const mesh of others) {
+            const outside = mesh.getChildren().filter(child => !meshSet.has(child));
+            if (outside.length) throw new Error(`${mesh.name} has child nodes (${outside.map(child => child.name).join(', ')}): they would lose their parent`);
+        }
+        const merged = MeshWeld.mergeMeshes(meshes);
+        const pathOf = (mesh) => {
+            const path = binding.pathOf(mesh);
+            if (!path) throw new Error(`${mesh.name} has no place in the file`);
+            return path;
+        };
+        const path = pathOf(first);
+        const json = path.reduce((value, key) => value?.[key], binding.document) ?? {};
+        // The vertices go where they are (a shared geometry of converted models) unless meshes not
+        // merged share it: then into the mesh, without the geometry (the loader finds it by unique id first)
+        const keyOf = holder => JSON.stringify(holder);
+        const users = new Map();
+        for (const mesh of this._container().meshes) {
+            const holder = binding.vertexHolderPath(mesh);
+            if (!holder) continue;
+            if (!users.has(keyOf(holder))) users.set(keyOf(holder), []);
+            users.get(keyOf(holder)).push(mesh);
+        }
+        const onlyMerged = holder => users.get(keyOf(holder))?.every(mesh => meshSet.has(mesh)) ?? false;
+        /** @type {DocumentOp[]} */
+        const ops = [];
+        let holder = binding.vertexHolderPath(first) ?? path;
+        if (keyOf(holder) !== keyOf(path) && !onlyMerged(holder)) {
+            holder = path;
+            for (const property of ['geometryId', 'geometryUniqueId']) if (json[property] !== undefined) ops.push({ op: 'set', path: [...path, property], value: null });
+        }
+        const holderJson = holder.reduce((value, key) => value?.[key], binding.document) ?? {};
+        merged.data.forEach((values, kind) => ops.push({ op: 'set', path: [...holder, VERTEX_PROPERTIES[kind]], value: Array.from(values, float32) }));
+        for (const [kind, property] of Object.entries(VERTEX_PROPERTIES)) {
+            if (!merged.data.has(kind) && holderJson[property] !== undefined) ops.push({ op: 'set', path: [...holder, property], value: null });
+        }
+        ops.push({ op: 'set', path: [...holder, 'indices'], value: merged.indices });
+        // The influences are written expanded (one number per influence)
+        if (merged.data.has(BABYLON.VertexBuffer.MatricesIndicesKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExpanded'], value: true });
+        if (merged.data.has(BABYLON.VertexBuffer.MatricesIndicesExtraKind)) ops.push({ op: 'set', path: [...holder, 'matricesIndicesExtraExpanded'], value: true });
+        ops.push({ op: 'set', path: [...path, 'subMeshes'], value: merged.subMeshes.map(subMesh => ({ ...subMesh, verticesStart: 0, verticesCount: merged.vertexCount })) });
+        // Shared geometries only the removed meshes used go with them
+        const removedHolders = new Set([keyOf(holder)]);
+        for (const mesh of others) {
+            const own = binding.vertexHolderPath(mesh);
+            if (!own || keyOf(own) === keyOf(pathOf(mesh)) || removedHolders.has(keyOf(own)) || !onlyMerged(own)) continue;
+            removedHolders.add(keyOf(own));
+            ops.push({ op: 'remove', path: own });
+        }
+        // The loader links the material by its unique id first
+        if (json.materialUniqueId !== undefined) ops.push({ op: 'set', path: [...path, 'materialUniqueId'], value: null });
+        if (merged.materials.length > 1) {
+            const multi = { name: `${first.name} materials`, id: newId(), materials: merged.materials.map(material => material?.id ?? '') };
+            ops.push({ op: 'insert', arrayPath: ['multiMaterials'], value: multi });
+            ops.push({ op: 'set', path: [...path, 'materialId'], value: multi.id });
+        } else {
+            ops.push({ op: 'set', path: [...path, 'materialId'], value: merged.materials[0]?.id ?? '' });
+        }
+        others.forEach(mesh => ops.push({ op: 'remove', path: pathOf(mesh) }));
+        this._postOps(`Merge ${meshes.length} meshes of ${name}`, ops);
+        return `Merged ${meshes.length} meshes of ${name} into ${first.name}: ${merged.vertexCount} vertices, ${merged.indices.length / 3} triangles, ${merged.materials.length} material${merged.materials.length > 1 ? 's' : ''}`;
+    }
+
+    /**
      * Deletes vertices of a mesh and the triangles that use them (`MeshWeld.removeVertices`).
      * @param {BABYLON.Mesh} mesh
      * @param {number[]} vertices
@@ -360,6 +514,35 @@ export class ModelEdits {
      * @param {string} label
      */
     _applyGeometry(mesh, result, label) {
+        this._applyGeometries([this._geometryChange(mesh, result)], label);
+    }
+
+    /**
+     * Applies the geometry changes of several meshes as one undo step.
+     * @param {GeometryChange[]} changes
+     * @param {string} label
+     */
+    _applyGeometries(changes, label) {
+        if (this._binding()) {
+            this._postOps(label, changes.flatMap(change => change.ops));
+            return;
+        }
+        this._history.executeMutation(label,
+            () => changes.map(change => change.capture()),
+            () => changes.forEach(change => change.write(change.after)),
+            states => changes.forEach((change, index) => change.write(states[index])));
+        changes.forEach(change => this._markChanged(change.mesh, 'modified'));
+    }
+
+    /**
+     * What gives a mesh a new geometry (see _applyGeometry): document ops in a `.babylon` text, else
+     * a capture / write pair for the undo history.
+     * @param {BABYLON.Mesh} mesh
+     * @param {import('./MeshWeld').WeldedMesh} result
+     * @returns {GeometryChange}
+     * @throws when the mesh has vertex buffers the editor cannot write or no place in the file
+     */
+    _geometryChange(mesh, result) {
         const users = mesh.geometry?.meshes ?? [mesh];
         const unknown = [...result.data.keys()].filter(kind => !VERTEX_PROPERTIES[kind]);
         if (unknown.length) throw new Error(`${mesh.name} has vertex buffers the editor cannot change: ${unknown.join(', ')}`);
@@ -392,8 +575,7 @@ export class ModelEdits {
                     if (hadTangents) ops.push({ op: 'set', path: [...base, 'tangents'], value: null });
                 });
             }
-            this._postOps(label, ops);
-            return;
+            return { mesh, ops };
         }
         const geometry = mesh.geometry;
         const manager = mesh.morphTargetManager;
@@ -426,8 +608,7 @@ export class ModelEdits {
             subMeshes: users.map(() => subMeshes),
             targets: result.targets.map(({ data }) => new Map(targetFields.map(([key]) => [key, data.get(key) ?? null]))),
         };
-        this._history.executeMutation(label, capture, () => write(after), state => write(state));
-        this._markChanged(mesh, 'modified');
+        return { mesh, capture, write, after };
     }
 
     /**

@@ -63,7 +63,7 @@ export function layoutIcon({ side, count }) {
 
 /** @typedef {'textured' | 'solid' | 'wireframe'} RenderMode */
 
-/** @typedef {'view' | 'select' | 'edit'} CursorMode the left button turns the camera / selects / selects and edits */
+/** @typedef {'view' | 'edit'} CursorMode the left button turns the camera / selects and edits */
 
 /** @typedef {'vertices' | 'normals' | 'boneAxes'} ViewOverlay what a view can show over the model */
 

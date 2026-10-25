@@ -122,9 +122,35 @@ export class ScreenSelection {
      * @returns {number} the vertex, or -1
      */
     static nearestVertex(scene, mesh, x, y, radius, occluders) {
+        return ScreenSelection._nearest(scene, mesh, x, y, radius, occluders)?.vertex ?? -1;
+    }
+
+    /**
+     * The vertex drawn nearest to a point of the canvas among several meshes (as nearestVertex).
+     * @param {BABYLON.Scene} scene
+     * @param {BABYLON.AbstractMesh[]} meshes
+     * @param {number} x CSS pixels of the canvas
+     * @param {number} y
+     * @param {number} radius CSS pixels
+     * @param {BABYLON.AbstractMesh[] | null} occluders
+     * @returns {{ mesh: BABYLON.AbstractMesh, vertex: number } | null}
+     */
+    static nearestVertexIn(scene, meshes, x, y, radius, occluders) {
+        let best = null;
+        for (const mesh of meshes) {
+            const found = ScreenSelection._nearest(scene, mesh, x, y, radius, occluders);
+            if (found && (!best || found.distance < best.distance)) best = { mesh, ...found };
+        }
+        return best && { mesh: best.mesh, vertex: best.vertex };
+    }
+
+    /**
+     * @returns {{ vertex: number, distance: number } | null} the nearest vertex no occluder hides and its distance (render pixels)
+     */
+    static _nearest(scene, mesh, x, y, radius, occluders) {
         const view = projection(scene);
         const positions = ScreenSelection.drawnPositions(mesh);
-        if (!view || !positions) return -1;
+        if (!view || !positions) return null;
         const screen = ScreenSelection._project(positions, view);
         const [px, py, reach] = [x / view.scale, y / view.scale, radius / view.scale];
         const near = [];
@@ -132,12 +158,12 @@ export class ScreenSelection {
             const distance = Math.hypot(screen[vertex * 3] - px, screen[vertex * 3 + 1] - py);
             if (screen[vertex * 3 + 2] > 0 && distance <= reach) near.push({ vertex, distance });
         }
-        if (!near.length) return -1;
+        if (!near.length) return null;
         // Nearest to the pointer first; the visibility test is made only until one passes
         near.sort((a, b) => a.distance - b.distance || a.vertex - b.vertex);
-        if (!occluders) return near[0].vertex;
+        if (!occluders) return near[0];
         const grid = ScreenSelection._occluderGrid(mesh, screen, occluders, view);
-        return near.find(({ vertex }) => !ScreenSelection._hidden(grid, mesh, positions, screen, vertex))?.vertex ?? -1;
+        return near.find(({ vertex }) => !ScreenSelection._hidden(grid, mesh, positions, screen, vertex)) ?? null;
     }
 
     /**
