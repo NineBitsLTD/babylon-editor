@@ -216,6 +216,12 @@ export class BabylonJsonBinding {
             if (!multi) return;
             this._paths.set(multi, ['multiMaterials', index]);
             this._bind(['multiMaterials', index, 'name'], () => multi.name, (value) => { multi.name = value; });
+            // The material of each sub-mesh index, by id; a changed list in the text reloads the model
+            this._bind(['multiMaterials', index, 'materials'], () => multi.subMaterials.map(material => material?.id ?? ''), () => false);
+            // The loader reads these first when the file has them
+            if (Array.isArray(source.materialsUniqueIds)) {
+                this._bind(['multiMaterials', index, 'materialsUniqueIds'], () => multi.subMaterials.map(material => (material ? this._fileUniqueIds.get(material) ?? null : null)), () => false);
+            }
             if (Number.isFinite(Number(source.uniqueId))) this._fileUniqueIds.set(multi, Number(source.uniqueId));
         });
         this._bindSkeletons(json, container);
@@ -617,6 +623,8 @@ export class BabylonJsonBinding {
             if (!group) return;
             used.add(group);
             const base = ['animationGroups', index];
+            // Its place: a clip of a converted glTF model is deleted with it
+            this._paths.set(group, base);
             const matched = new Set();
             (source.targetedAnimations ?? []).forEach((targeted, targetIndex) => {
                 const found = group.targetedAnimations.find(candidate => !matched.has(candidate)

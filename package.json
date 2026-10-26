@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -138,6 +138,12 @@
         "key": "ctrl+s",
         "mac": "cmd+s",
         "when": "resourceExtname == .babylon"
+      },
+      {
+        "command": "babylon-editor.tree.delete",
+        "key": "delete",
+        "mac": "cmd+backspace",
+        "when": "focusedView == babylon-editor.modelTree && !inputFocus"
       },
       {
         "command": "babylon-editor.saveAs",

@@ -8,6 +8,7 @@ import { HiddenGeometry } from './HiddenGeometry';
 import { MeshWeld, meshKinds, VERTEX_PROPERTIES } from './MeshWeld';
 import { ClipRetarget } from './ClipRetarget';
 import { ModelConverter } from './ModelConverter';
+import { isJointTip, jointNodes } from './ModelOutline';
 
 /**
  * An operation on the `.babylon` document that changes its structure.
@@ -61,6 +62,11 @@ const COLLECTIONS = {
  *   under a `__root__` node with scaling z = -1)
  * @property {import('./ClipRetarget').Rig} [rig] the rest pose of the skeleton the clip animates, to
  *   retarget it to another skeleton
+ */
+
+/**
+ * @typedef {object} DeleteOptions
+ * @property {boolean} [withJoints] a deleted skeleton takes its joint nodes (and the nodes they leave empty) along
  */
 
 /**
@@ -227,7 +233,7 @@ export class ModelEdits {
 
     /**
      * @param {import('./ModelOutline').ModelItemData} data
-     * @returns {{ label: string, canRename: boolean, dependents: string[] }}
+     * @returns {{ label: string, canRename: boolean, dependents: string[], joints: number }}
      */
     info(data) {
         const object = objectOf(data);
@@ -236,7 +242,7 @@ export class ModelEdits {
         if (data.kind === 'material') {
             container.meshes.filter(mesh => mesh.material === object).forEach(mesh => dependents.push(`mesh ${mesh.name} loses its material`));
         } else if (data.kind === 'skeleton') {
-            container.meshes.filter(mesh => mesh.skeleton === object).forEach(mesh => dependents.push(`mesh ${mesh.name} loses its skeleton`));
+            container.meshes.filter(mesh => mesh.skeleton === object).forEach(mesh => dependents.push(`mesh ${mesh.name} keeps the shape of the bind pose without the skeleton`));
         } else if (data.kind === 'light' && object.getShadowGenerator?.()) {
             dependents.push('its shadow generator is deleted too');
         } else if (data.kind === 'texture') {
@@ -249,6 +255,8 @@ export class ModelEdits {
             label: data.kind === 'shadowGenerator' ? 'Shadow generator' : object?.name ?? '',
             canRename: !['shadowGenerator', 'texture'].includes(data.kind),
             dependents,
+            // The joint nodes a skeleton can take along (the host asks)
+            joints: data.kind === 'skeleton' ? this._jointNodesToRemove(object).size : 0,
         };
     }
 
@@ -279,13 +287,146 @@ export class ModelEdits {
 
     /**
      * @param {import('./ModelOutline').ModelItemData} data
+     * @param {DeleteOptions} [options]
      */
-    delete(data) {
+    delete(data, options = {}) {
+        this.deleteMany([data], options);
+    }
+
+    /**
+     * Deletes objects of the tree as one undo step.
+     * @param {import('./ModelOutline').ModelItemData[]} items
+     * @param {DeleteOptions} [options]
+     */
+    deleteMany(items, options = {}) {
+        if (!items.length) return;
+        const label = items.length === 1 ? `Delete ${this.info(items[0]).label}` : `Delete ${items.length} objects`;
         if (this._binding()) {
-            this._postOps(`Delete ${this.info(data).label}`, this._deleteOps(data));
-        } else {
-            this._deleteInScene(data);
+            this._postOps(label, this._deleteManyOps(items, options));
+            return;
         }
+        const steps = items.map(data => this._sceneDeletion(data, options));
+        this._structural(label, () => steps.forEach(step => step.apply()), () => [...steps].reverse().forEach(step => step.revert()));
+    }
+
+    /**
+     * The document ops of deleting several objects: the clips of one owner become one change of its
+     * ranges, ops inside a removed object and repeated ops are left out (their ranges would overlap).
+     * @param {import('./ModelOutline').ModelItemData[]} items
+     * @param {DeleteOptions} options
+     * @returns {DocumentOp[]}
+     */
+    _deleteManyOps(items, options) {
+        const clips = items.filter(data => data.kind === 'clip');
+        /** @type {DocumentOp[]} */
+        const ops = items.filter(data => data.kind !== 'clip').flatMap(data => this._deleteOps(data, options));
+        if (clips.length) ops.push(...this._clipDeleteOps(clips.map(data => objectOf(data))));
+        const removed = ops.filter(op => op.op === 'remove').map(op => op.path);
+        const inside = (path, base) => path.length > base.length && base.every((key, index) => path[index] === key);
+        const seen = new Set();
+        return ops.filter((op) => {
+            const path = op.path ?? op.arrayPath;
+            if (removed.some(base => inside(path, base))) return false;
+            const key = JSON.stringify([op.op, path]);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+
+    /**
+     * @param {any[]} clips clips of a `.babylon` file: named frame ranges of its skeletons / nodes,
+     *   or animation groups of the file (converted glTF models)
+     * @returns {DocumentOp[]} one change of the ranges of each owner, the removal of each group
+     */
+    _clipDeleteOps(clips) {
+        const binding = this._binding();
+        const ops = [];
+        const groupClips = clips.filter(clip => !clip.ranges.length && binding.pathOf(clip.group));
+        groupClips.forEach(clip => ops.push({ op: 'remove', path: binding.pathOf(clip.group) }));
+        const ranged = clips.filter(clip => !groupClips.includes(clip));
+        if (!ranged.length) return ops;
+        const names = new Set(ranged.map(clip => clip.name));
+        for (const owner of [...this._container().skeletons, ...this._container().meshes]) {
+            const ranges = owner.getAnimationRanges?.().filter(Boolean) ?? [];
+            if (!ranges.some(range => names.has(range.name)) || !binding.pathOf(owner)) continue;
+            ops.push({ op: 'set', path: [...binding.pathOf(owner), 'ranges'], value: ranges.filter(range => !names.has(range.name)).map(({ name, from, to }) => ({ name, from, to })) });
+        }
+        if (ops.length === groupClips.length) throw new Error('This clip is the whole timeline: delete the animation keys instead');
+        return ops;
+    }
+
+    /**
+     * The joint nodes of a skeleton (and the tips of its leaf bones) that can go with it: a node goes
+     * when everything below it goes, so a node something else hangs from (a weapon on a hand, a
+     * camera) stays with its ancestors; joints of other skeletons stay.
+     * @param {BABYLON.Skeleton} skeleton
+     * @returns {Set<BABYLON.Node>}
+     */
+    _jointNodesToRemove(skeleton) {
+        const container = this._container();
+        const joints = jointNodes([skeleton]);
+        const others = jointNodes(container.skeletons.filter(other => other !== skeleton));
+        const candidates = new Set([...joints].filter(node => !others.has(node)));
+        const allJoints = jointNodes(container.skeletons);
+        for (const joint of joints) joint.getChildren().filter(child => isJointTip(child, allJoints)).forEach(tip => candidates.add(tip));
+        /** @type {Map<BABYLON.Node, boolean>} */
+        const goes = new Map();
+        const removable = (node) => {
+            if (!goes.has(node)) goes.set(node, candidates.has(node) && node.getChildren().every(removable));
+            return goes.get(node);
+        };
+        return new Set([...candidates].filter(removable));
+    }
+
+    /**
+     * Removed nodes with the ancestors they leave empty: a transform node, or a mesh without
+     * vertices, whose children (objects of the model) all go; joints of skeletons and the nodes of
+     * `keep` stay.
+     * @param {Set<BABYLON.Node>} removed
+     * @param {Set<BABYLON.Node>} [keep]
+     * @returns {Set<BABYLON.Node>} the removed nodes and the emptied ancestors
+     */
+    _emptiedAncestors(removed, keep = new Set()) {
+        const container = this._container();
+        const own = new Set([...container.meshes, ...container.transformNodes, ...container.cameras, ...container.lights]);
+        const joints = jointNodes(container.skeletons);
+        const result = new Set(removed);
+        const queue = [...removed].map(node => node.parent).filter(Boolean);
+        while (queue.length) {
+            const node = queue.shift();
+            if (result.has(node) || keep.has(node) || !own.has(node) || joints.has(node)) continue;
+            if (!(node instanceof BABYLON.TransformNode) || (node instanceof BABYLON.AbstractMesh && node.getTotalVertices() > 0)) continue;
+            if (!node.getChildren().filter(child => own.has(child)).every(child => result.has(child))) continue;
+            result.add(node);
+            if (node.parent) queue.push(node.parent);
+        }
+        return result;
+    }
+
+    /**
+     * Document ops removing nodes with the tracks of animation groups that target them (a group left
+     * without tracks goes too); their own animations are in them.
+     * @param {Set<BABYLON.Node>} nodes
+     * @returns {DocumentOp[]}
+     */
+    _nodeRemovalOps(nodes) {
+        const binding = this._binding();
+        /** @type {DocumentOp[]} */
+        const ops = [];
+        nodes.forEach((node) => {
+            const path = binding.pathOf(node);
+            if (path) ops.push({ op: 'remove', path });
+        });
+        const ids = new Set([...nodes].map(node => node.id));
+        (binding.document.animationGroups ?? []).forEach((group, groupIndex) => {
+            const targeted = group?.targetedAnimations ?? [];
+            const gone = targeted.map((target, index) => (ids.has(target?.targetId) ? index : -1)).filter(index => index >= 0);
+            if (!gone.length) return;
+            if (gone.length === targeted.length) ops.push({ op: 'remove', path: ['animationGroups', groupIndex] });
+            else gone.forEach(index => ops.push({ op: 'remove', path: ['animationGroups', groupIndex, 'targetedAnimations', index] }));
+        });
+        return ops;
     }
 
     /**
@@ -475,7 +616,10 @@ export class ModelEdits {
         } else {
             ops.push({ op: 'set', path: [...path, 'materialId'], value: merged.materials[0]?.id ?? '' });
         }
-        others.forEach(mesh => ops.push({ op: 'remove', path: pathOf(mesh) }));
+        // The other meshes go with the nodes they leave empty (not the ancestors of the kept mesh)
+        const keep = new Set();
+        for (let node = /** @type {BABYLON.Node | null} */ (first); node; node = node.parent) keep.add(node);
+        ops.push(...this._nodeRemovalOps(this._emptiedAncestors(new Set(others), keep)));
         this._postOps(`Merge ${meshes.length} meshes of ${name}`, ops);
         return `Merged ${meshes.length} meshes of ${name} into ${first.name}: ${merged.vertexCount} vertices, ${merged.indices.length / 3} triangles, ${merged.materials.length} material${merged.materials.length > 1 ? 's' : ''}`;
     }
@@ -1268,7 +1412,7 @@ export class ModelEdits {
      * @param {import('./ModelOutline').ModelItemData} data
      * @returns {DocumentOp[]}
      */
-    _deleteOps(data) {
+    _deleteOps(data, options = {}) {
         const binding = this._binding();
         const object = objectOf(data);
         const container = this._container();
@@ -1282,17 +1426,9 @@ export class ModelEdits {
         switch (data.kind) {
             case 'texture':
                 return [{ op: 'set', path: pathOf(object), value: null }];
-            case 'clip': {
+            case 'clip':
                 // A clip of a .babylon file is a named frame range of its skeletons / nodes
-                for (const owner of [...container.skeletons, ...container.meshes]) {
-                    if (!owner.getAnimationRange?.(object.name)) continue;
-                    const ranges = owner.getAnimationRanges().filter(range => range && range.name !== object.name)
-                        .map(({ name, from, to }) => ({ name, from, to }));
-                    ops.push({ op: 'set', path: [...pathOf(owner), 'ranges'], value: ranges });
-                }
-                if (!ops.length) throw new Error('This clip is the whole timeline: delete the animation keys instead');
-                return ops;
-            }
+                return this._clipDeleteOps([object]);
             case 'material':
                 container.meshes.filter(mesh => mesh.material === object && binding.pathOf(mesh))
                     .forEach(mesh => ops.push({ op: 'set', path: [...binding.pathOf(mesh), 'materialId'], value: '' }));
@@ -1319,6 +1455,7 @@ export class ModelEdits {
                         ops.push({ op: 'set', path: [...path, 'numBoneInfluencers'], value: 0 });
                     }
                 }
+                if (options.withJoints) ops.push(...this._nodeRemovalOps(this._emptiedAncestors(this._jointNodesToRemove(object))));
                 break;
             }
         }
@@ -1448,16 +1585,35 @@ export class ModelEdits {
     // --- other formats: the scene -----------------------------------------------------------------
 
     /**
+     * Deleting an object of the scene (other formats), as a pair of steps for one undoable command.
      * @param {import('./ModelOutline').ModelItemData} data
+     * @param {DeleteOptions} options
+     * @returns {{ apply: () => void, revert: () => void }}
      */
-    _deleteInScene(data) {
+    _sceneDeletion(data, options) {
         const object = objectOf(data);
         const container = this._container();
-        const label = `Delete ${this.info(data).label}`;
+        if (data.kind === 'shadowGenerator') throw new Error('Delete the light, or set the shadow properties of the light instead');
+        if (data.kind === 'clip') {
+            const group = object.group;
+            const ranges = object.ranges.map(range => ({ range, owner: [...container.skeletons, ...container.meshes].find(owner => owner.getAnimationRange?.(range.name) === range) }));
+            return {
+                apply: () => (ranges.length ? ranges.forEach(({ range, owner }) => owner?.deleteAnimationRange(range.name, false)) : this._detach(group)),
+                revert: () => (ranges.length ? ranges.forEach(({ range, owner }) => owner?.createAnimationRange(range.name, range.from, range.to)) : this._attach(group)),
+            };
+        }
         // References cleared by the deletion, restored by undo
         const references = [];
+        /** @type {{ apply: () => void, revert: () => void }[]} further steps (the skeleton: vertices, joint nodes) */
+        const steps = [];
         if (data.kind === 'material') {
             container.meshes.filter(mesh => mesh.material === object).forEach(mesh => references.push([mesh, 'material', object]));
+        } else if (data.kind === 'texture') {
+            for (const material of container.materials) {
+                for (const key of Object.keys(material)) {
+                    if (material[key] === object) references.push([material, key, object]);
+                }
+            }
         } else if (data.kind === 'skeleton') {
             container.meshes.filter(mesh => mesh.skeleton === object).forEach(mesh => references.push([mesh, 'skeleton', object]));
             // The meshes keep the shape of the bind pose; undo puts the skinned vertices back
@@ -1466,41 +1622,60 @@ export class ModelEdits {
                 after,
                 before: new Map([...after.keys()].map(kind => [kind, Float32Array.from(mesh.getVerticesData(kind))])),
             }));
-            const write = (mesh, values) => values.forEach((array, kind) => {
-                if (array) mesh.setVerticesData(kind, Float32Array.from(array), true, BABYLON.VertexBuffer.DeduceStride(kind));
-                else mesh.removeVerticesData(kind);
-            });
-            this._structural(`Delete ${this.info(data).label}`,
-                () => {
-                    references.forEach(([target, key]) => { target[key] = null; });
-                    baked.forEach(({ mesh, after }) => { write(mesh, after); mesh.refreshBoundingInfo(); });
-                    this._detach(object);
-                },
-                () => {
-                    this._attach(object);
-                    baked.forEach(({ mesh, before }) => { write(mesh, before); mesh.refreshBoundingInfo(); });
-                    references.forEach(([target, key, value]) => { target[key] = value; });
+            const write = (mesh, values) => {
+                values.forEach((array, kind) => {
+                    if (array) mesh.setVerticesData(kind, Float32Array.from(array), true, BABYLON.VertexBuffer.DeduceStride(kind));
+                    else mesh.removeVerticesData(kind);
                 });
-            return;
-        } else if (data.kind === 'texture') {
-            for (const material of container.materials) {
-                for (const key of Object.keys(material)) {
-                    if (material[key] === object) references.push([material, key, object]);
+                mesh.refreshBoundingInfo();
+            };
+            steps.push({
+                apply: () => baked.forEach(({ mesh, after }) => write(mesh, after)),
+                revert: () => baked.forEach(({ mesh, before }) => write(mesh, before)),
+            });
+            if (options.withJoints) steps.push(this._sceneNodeRemoval(this._emptiedAncestors(this._jointNodesToRemove(object))));
+        }
+        return {
+            apply: () => {
+                references.forEach(([target, key]) => { target[key] = null; });
+                steps.forEach(step => step.apply());
+                this._detach(object);
+            },
+            revert: () => {
+                this._attach(object);
+                [...steps].reverse().forEach(step => step.revert());
+                references.forEach(([target, key, value]) => { target[key] = value; });
+            },
+        };
+    }
+
+    /**
+     * Removing nodes from the scene with the tracks of animation groups that target them (a group
+     * left without tracks goes too), as a pair of steps for an undoable command.
+     * @param {Set<BABYLON.Node>} nodes
+     * @returns {{ apply: () => void, revert: () => void }}
+     */
+    _sceneNodeRemoval(nodes) {
+        const groups = this._container().animationGroups
+            .filter(group => group.targetedAnimations.some(({ target }) => nodes.has(target)))
+            .map(group => ({ group, all: group.targetedAnimations.slice() }));
+        return {
+            apply: () => {
+                for (const { group, all } of groups) {
+                    const kept = all.filter(({ target }) => !nodes.has(target));
+                    group.targetedAnimations.splice(0, group.targetedAnimations.length, ...kept);
+                    if (!kept.length) this._detach(group);
                 }
-            }
-        }
-        const clear = () => references.forEach(([target, key]) => { target[key] = null; });
-        const restore = () => references.forEach(([target, key, value]) => { target[key] = value; });
-        if (data.kind === 'clip') {
-            const group = object.group;
-            const ranges = object.ranges.map(range => ({ range, owner: [...container.skeletons, ...container.meshes].find(owner => owner.getAnimationRange?.(range.name) === range) }));
-            this._structural(label,
-                () => (ranges.length ? ranges.forEach(({ range, owner }) => owner?.deleteAnimationRange(range.name, false)) : this._detach(group)),
-                () => (ranges.length ? ranges.forEach(({ range, owner }) => owner?.createAnimationRange(range.name, range.from, range.to)) : this._attach(group)));
-            return;
-        }
-        if (data.kind === 'shadowGenerator') throw new Error('Delete the light, or set the shadow properties of the light instead');
-        this._structural(label, () => { clear(); this._detach(object); }, () => { this._attach(object); restore(); });
+                nodes.forEach(node => this._detach(node));
+            },
+            revert: () => {
+                nodes.forEach(node => this._attach(node));
+                for (const { group, all } of groups) {
+                    if (!this._container().animationGroups.includes(group)) this._attach(group);
+                    group.targetedAnimations.splice(0, group.targetedAnimations.length, ...all);
+                }
+            },
+        };
     }
 
     /**

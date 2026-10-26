@@ -422,11 +422,13 @@ class Editor {
 
     /**
      * Runs a command of the tree context menu (the host asks for names and confirmations).
-     * @param {{ requestId: number, op: string, id?: string, name?: string, section?: string, kind?: string, extra?: object }} message
+     * @param {{ requestId: number, op: string, id?: string, ids?: string[], name?: string, section?: string, kind?: string, extra?: any }} message
+     *   ids: the selected items of a delete
      * @returns {any} the result for the host
      */
-    _runTreeCommand({ op, id, name, section, kind, extra }) {
+    _runTreeCommand({ op, id, ids, name, section, kind, extra }) {
         if (!this._container) throw new Error('No model is loaded');
+        if (op === 'delete' && ids?.length) return this._deleteTreeItems(ids, extra);
         const data = id ? (this._tree.get(id) ?? { data: this._inspectorObjects.get(id) })?.data : null;
         if (id && !data) throw new Error('The item no longer exists');
         // Cameras of the views live in memory: also for view-only formats
@@ -438,12 +440,28 @@ class Editor {
             case 'info': return this._edits.info(data);
             case 'textureTargets': return this._edits.textureTargets();
             case 'rename': return this._edits.rename(data, name);
-            case 'delete': return this._edits.delete(data);
+            case 'delete': return this._edits.delete(data, extra ?? {});
             case 'add': return this._edits.add(section, kind, name, extra);
             case 'copy': return this._edits.copy(data);
             case 'paste': return this._edits.paste(section, extra?.object, extra?.sameFile, extra?.choices);
             default: throw new Error(`Unknown command ${op}`);
         }
+    }
+
+    /**
+     * Deletes the selected items of the tree: the virtual cameras in memory, the others as one undo step.
+     * @param {string[]} ids
+     * @param {import('./editor/ModelEdits').DeleteOptions} [options]
+     */
+    _deleteTreeItems(ids, options = {}) {
+        const items = ids.map(id => (this._tree.get(id) ?? { data: this._inspectorObjects.get(id) })?.data).filter(Boolean);
+        if (!items.length) throw new Error('The items no longer exist');
+        const virtual = items.filter(data => data.kind === 'camera' && data.virtual);
+        const others = items.filter(data => !virtual.includes(data));
+        if (others.length && !this._canEdit) throw new Error(`Editing .${this._type} files is not supported`);
+        virtual.forEach(data => this._runVirtualCameraCommand('delete', data.camera));
+        this._edits.deleteMany(others, options);
+        return null;
     }
 
     /**
@@ -1191,6 +1209,7 @@ class Editor {
             },
             selectedRow: () => this._panel.selectedRow,
             fileName: window.payload?.fileName || `model.${this._type}`,
+            reshow: () => { if (this._selection) this._show(this._selection); },
             convertedFrom: window.payload?.convertedFrom ?? null,
             isHiddenInView: mesh => this._hiddenInView.has(mesh),
             setHiddenInView: (mesh, hidden) => this._setHiddenInView(mesh, hidden),

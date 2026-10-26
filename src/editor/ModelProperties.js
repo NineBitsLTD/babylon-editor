@@ -24,6 +24,7 @@ import { textureFileSize, texturePreview } from './TextureImage';
  * @property {(clip: import('./AnimationController').AnimationClip, frame: number) => void} showFrame pauses on a frame of a clip
  * @property {() => number} selectedRow selected row of the inspector table, or -1
  * @property {string} fileName
+ * @property {() => void} reshow shows the inspector of the shown object again (its rows changed)
  * @property {import('./FileInfo').FileField[] | null} fileFields read-only fields of the file (header / asset info of a binary file, the sizes of a text document)
  * @property {import('./BabylonJsonBinding').DocumentField[] | null} documentFields editable top-level values of a .babylon text
  * @property {import('./BabylonJsonBinding').BabylonJsonBinding | null} binding the document binding of a .babylon text (null for other formats)
@@ -987,17 +988,73 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _multiMaterial(material, { openObject }) {
+    static _multiMaterial(material, { openObject, container, history, binding, reshow }) {
+        const meshes = () => container.meshes.filter(mesh => mesh.material === material);
+        const label = index => `Material ${index}`;
+        /** @param {BABYLON.Material[]} slots the material of each sub-mesh index */
+        const writeSlots = (slots) => { material.subMaterials = slots.slice(); };
+        // A removed slot: its sub-meshes take the default material (an index out of the list), the later ones move up
+        const capture = () => ({ slots: material.subMaterials.slice(), indices: meshes().map(mesh => [mesh, mesh.subMeshes.map(subMesh => subMesh.materialIndex)]) });
+        const restore = (state) => {
+            writeSlots(state.slots);
+            state.indices.forEach(([mesh, indices]) => mesh.subMeshes.forEach((subMesh, index) => { subMesh.materialIndex = indices[index]; }));
+            state.indices.forEach(([mesh]) => queueSubMeshes(mesh));
+            reshow();
+        };
+        const queueSubMeshes = mesh => binding?.queuePatch(mesh, 'subMeshes', mesh.subMeshes.map(({ materialIndex, verticesStart, verticesCount, indexStart, indexCount }) => ({ materialIndex, verticesStart, verticesCount, indexStart, indexCount })));
+        const remove = index => history.executeMutation(`Remove ${label(index)} of ${material.name}`, capture, () => {
+            writeSlots(material.subMaterials.filter((_, slot) => slot !== index));
+            for (const mesh of meshes()) {
+                mesh.subMeshes.forEach((subMesh) => {
+                    if (subMesh.materialIndex === index) subMesh.materialIndex = -1;
+                    else if (subMesh.materialIndex > index) subMesh.materialIndex--;
+                });
+                queueSubMeshes(mesh);
+            }
+            reshow();
+        }, restore);
+        const used = index => meshes().reduce((count, mesh) => count + mesh.subMeshes.filter(subMesh => subMesh.materialIndex === index).length, 0);
         /** @type {PropertyDescriptor[]} */
         const properties = [
             textProperty(material, 'name'),
             readonlyProperty('Type', () => material.getClassName()),
-            ...material.subMaterials.map((subMaterial, index) => ({
-                ...readonlyProperty(`Material ${index}`, () => subMaterial?.name || '(none)'),
-                action: openObjectAction('material', () => subMaterial, chosen => openObject({ kind: 'material', material: chosen })),
+            ...material.subMaterials.map((_, index) => ({
+                label: label(index),
+                type: /** @type {const} */ ('select'),
+                options: () => [
+                    { value: '', label: '(none)' },
+                    ...container.materials.map(candidate => ({ value: String(candidate.uniqueId), label: candidate.name || '(unnamed)' })),
+                ],
+                get: () => String(material.subMaterials[index]?.uniqueId ?? ''),
+                set: (value) => {
+                    const slots = material.subMaterials.slice();
+                    slots[index] = container.materials.find(candidate => String(candidate.uniqueId) === value) ?? null;
+                    writeSlots(slots);
+                },
+                action: openObjectAction('material', () => material.subMaterials[index], chosen => openObject({ kind: 'material', material: chosen })),
             })),
         ];
-        return { title: 'Multi-material', subtitle: () => material.name, properties };
+        return {
+            title: 'Multi-material',
+            subtitle: () => material.name,
+            notice: 'One material per sub-mesh index. A removed material: its sub-meshes take the default material, the sub-meshes of the later ones keep theirs.',
+            properties,
+            actions: [{
+                label: 'Add material',
+                title: 'Add a material at the end of the list (the last one again; choose another in its select); no sub-mesh uses it until one gets its index',
+                icon: 'add',
+                isDisabled: () => !container.materials.length,
+                run: () => history.executeMutation(`Add a material to ${material.name}`, capture, () => {
+                    writeSlots([...material.subMaterials, material.subMaterials[material.subMaterials.length - 1] ?? container.materials[0]]);
+                    reshow();
+                }, restore),
+            }, ...material.subMaterials.map((_, index) => ({
+                label: `Remove ${index}`,
+                title: () => `Remove ${label(index)} (${material.subMaterials[index]?.name ?? 'none'})${used(index) ? `: ${used(index)} sub-mesh(es) take the default material` : ''}; the later materials move up with their sub-meshes`,
+                icon: 'trash',
+                run: () => remove(index),
+            }))],
+        };
     }
 
     /**

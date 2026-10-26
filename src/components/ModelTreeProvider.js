@@ -70,12 +70,15 @@ export class ModelTreeProvider {
         const treeView = vscode.window.createTreeView(ModelTreeProvider.viewId, {
             treeDataProvider: this,
             showCollapseAll: true,
+            // Shift / Cmd+click selects several objects (Delete takes them all)
+            canSelectMany: true,
         });
         this._treeView = treeView;
         // Keyboard navigation changes the selection; clicks run the item command (also on the
         // selected item, which the selection event does not report)
-        const selection = treeView.onDidChangeSelection(({ selection: [node] }) => {
-            if (node && !node.contextValue?.startsWith('section:') && node.id !== this._shownId) this._show(node.id);
+        const selection = treeView.onDidChangeSelection(({ selection: nodes }) => {
+            const [node] = nodes;
+            if (nodes.length === 1 && !node.contextValue?.startsWith('section:') && node.id !== this._shownId) this._show(node.id);
         });
         const click = vscode.commands.registerCommand(ModelTreeProvider.clickCommand, async (id) => {
             if (id === this._shownId && Date.now() - this._shownAt < SELECT_CLICK_WINDOW) return;
@@ -92,7 +95,7 @@ export class ModelTreeProvider {
             vscode.window.registerFileDecorationProvider({ provideFileDecoration: uri => ModelTreeProvider._decoration(uri) }),
             vscode.commands.registerCommand(ModelTreeProvider.addCommand, node => this._run(() => this._add(node))),
             vscode.commands.registerCommand(ModelTreeProvider.renameCommand, node => this._run(() => this._rename(node))),
-            vscode.commands.registerCommand(ModelTreeProvider.deleteCommand, node => this._run(() => this._delete(node))),
+            vscode.commands.registerCommand(ModelTreeProvider.deleteCommand, (node, nodes) => this._run(() => this._delete(node, nodes))),
             vscode.commands.registerCommand(ModelTreeProvider.copyCommand, node => this._run(() => this._copy(node))),
             vscode.commands.registerCommand(ModelTreeProvider.pasteCommand, node => this._run(() => this._paste(node))),
         );
@@ -195,17 +198,34 @@ export class ModelTreeProvider {
     }
 
     /**
-     * @param {ModelTreeNode} node a model object
+     * Deletes a model object, or all selected ones when it is one of them (one undo step). A
+     * skeleton with joint nodes (glTF) asks whether they go too.
+     * @param {ModelTreeNode | undefined} node a model object (the one right-clicked; none for the key)
+     * @param {ModelTreeNode[]} [selected] the selected items of the tree
      */
-    async _delete(node) {
-        const info = await this._command({ op: 'info', id: node.id });
-        const answer = await vscode.window.showWarningMessage(
-            `Delete ${info.label || node.label}?`,
-            { modal: true, detail: info.dependents.length ? `Also: ${info.dependents.join('; ')}.` : 'Undo restores it.' },
-            'Delete',
-        );
-        if (answer !== 'Delete') return;
-        await this._command({ op: 'delete', id: node.id });
+    async _delete(node, selected = []) {
+        // A key in the tree gives no item: the selection is deleted
+        if (!node) {
+            selected = (this._treeView?.selection ?? []).filter(other => other.contextValue?.startsWith('item:') && other.contextValue !== 'item:timeline');
+            [node] = selected;
+            if (!node) return;
+        }
+        const nodes = (selected.some(other => other.id === node.id) ? selected : [node])
+            .filter(other => other.id === node.id || (other.contextValue?.startsWith('item:') && other.contextValue !== 'item:timeline'));
+        const infos = await Promise.all(nodes.map(other => this._command({ op: 'info', id: other.id })));
+        const names = infos.map((info, index) => info.label || nodes[index].label);
+        const dependents = infos.flatMap(info => info.dependents);
+        const joints = infos.reduce((sum, info) => sum + (info.joints ?? 0), 0);
+        const title = nodes.length === 1 ? `Delete ${names[0]}?` : `Delete ${nodes.length} objects?`;
+        const listed = nodes.length > 1 ? `${names.slice(0, 10).join(', ')}${names.length > 10 ? ', …' : ''}. ` : '';
+        const detail = `${listed}${dependents.length ? `Also: ${dependents.join('; ')}.` : 'Undo restores it.'}`;
+        const withJoints = 'Delete with Joint Nodes';
+        const only = nodes.length === 1 ? 'Delete Skeleton Only' : 'Delete without Joint Nodes';
+        const answer = joints
+            ? await vscode.window.showWarningMessage(title, { modal: true, detail: `${detail} ${joints} joint node(s) define the skeleton in the scene: with them go the tracks of the animations that move them; nodes something else hangs from stay.` }, withJoints, only)
+            : await vscode.window.showWarningMessage(title, { modal: true, detail }, 'Delete');
+        if (!answer) return;
+        await this._command({ op: 'delete', ids: nodes.map(other => other.id), extra: { withJoints: answer === withJoints } });
     }
 
     /**
