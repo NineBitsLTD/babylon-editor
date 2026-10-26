@@ -214,6 +214,7 @@ class Editor {
                 : { renderMode: viewSettings().renderMode ?? 'textured', vertices: false, display: { ...this._highlighter.skeletonDisplay } }),
             isSkeletonMode: () => this._highlighter.isSkeletonMode,
             onSelect: () => this._syncViewBar(),
+            onDoubleClick: index => this._toggleModelView(index),
             onBeforeView: settings => this._viewRendering.beforeView(settings),
             onAfterView: () => this._viewRendering.afterView(),
             onOverlaysNeeded: ({ vertices, normals, boneAxes }) => {
@@ -230,6 +231,8 @@ class Editor {
         this._view = view;
         /** @type {'model' | 'inspector'} */
         this._singleView = singleView;
+        /** @type {{ slots: string[], selected: number } | null} the desktop a double click on a view left */
+        this._desktopReturn = null;
         this._narrow = false;
         /** @type {import('./editor/Toolbar').EditorView | null} */
         this._shown = null;
@@ -318,6 +321,33 @@ class Editor {
         this._animations.showFrame(clip, ClipFrameEditor.shownFrame(clip));
         this._panel.refresh();
         this._panel.updateCurrentFrame();
+    }
+
+    /**
+     * A double click on a view: from the desktop the model is shown alone with the camera of that
+     * view; from the model view the desktop comes back with its layout, its cameras in their views
+     * (as before the double click) and that view selected.
+     * @param {number} index the view double-clicked
+     */
+    _toggleModelView(index) {
+        if (this._shown === 'desktop') {
+            const entry = this._cameraViews.entryOf(index);
+            if (!entry) return;
+            this._desktopReturn = { slots: this._cameraViews.slots, selected: index };
+            this._cameraViews.setSlot(0, entry.ref);
+            this._view = 'model';
+            this._singleView = 'model';
+            saveViewSettings({ view: 'model', singleView: 'model' });
+            this._updateLayout();
+        } else if (this._shown === 'model' && this._view === 'model' && !this._narrow) {
+            const back = this._desktopReturn;
+            this._desktopReturn = null;
+            if (back) this._cameraViews.setSlots(back.slots);
+            this._view = 'desktop';
+            saveViewSettings({ view: 'desktop' });
+            this._updateLayout();
+            if (back) this._cameraViews.select(back.selected);
+        }
     }
 
     /** Shows the chosen view; an editor too narrow for both shows the last single view. */
@@ -789,6 +819,7 @@ class Editor {
                 saveViewSettings({ renderMode: mode });
             },
             onSelectView: (view) => {
+                this._desktopReturn = null;
                 this._view = view;
                 if (view !== 'desktop') this._singleView = view;
                 saveViewSettings({ view, singleView: this._singleView });
@@ -817,6 +848,7 @@ class Editor {
                 active: entry.ref === this._cameraViews.entryOf(0)?.ref,
             })),
             onSelectCamera: (ref) => {
+                this._desktopReturn = null;
                 this._cameraViews.setSlot(0, ref);
                 this._view = 'model';
                 this._singleView = 'model';
@@ -824,6 +856,7 @@ class Editor {
                 this._updateLayout();
             },
             onSelectLayout: (layout) => {
+                this._desktopReturn = null;
                 this._layout = layout;
                 this._view = 'desktop';
                 saveViewSettings({ view: 'desktop', layout });

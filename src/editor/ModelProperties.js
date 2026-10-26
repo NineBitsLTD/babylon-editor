@@ -1,5 +1,6 @@
 import * as BABYLON from '@babylonjs/core';
 import { BABYLON_FILE_SCHEMA, MATERIAL_TEXTURE_SLOTS, schemaProperties } from './BabylonFileSchema';
+import { BoneReset } from './BoneReset';
 import { ClipFrameEditor } from './ClipFrameEditor';
 import { formatNumber } from './DataTable';
 import { isJointTip, jointNodes, textureLabel, triangleCount } from './ModelOutline';
@@ -1208,6 +1209,20 @@ export class ModelProperties {
             showPose(skeleton, 'bind');
         };
         const poseName = () => pose === 'rest' ? 'Rest pose' : 'Bind pose';
+        /** @param {BABYLON.Bone[]} reset */
+        const resetBones = reset => history.executeMutation(
+            reset.length === bones.length ? `Reset the bones of ${skeleton.name || 'the skeleton'}` : reset.length === 1 ? `Reset bone ${reset[0].name}` : `Reset ${reset.length} bones`,
+            () => BoneReset.capture(skeleton, container, animations),
+            () => BoneReset.apply(skeleton, reset, container, animations, binding),
+            state => BoneReset.restore(skeleton, state, animations),
+        );
+        /** @param {BABYLON.Bone[]} reset @returns {import('./PropertyPanel').PanelAction} */
+        const resetAction = reset => ({
+            label: reset.length === 1 ? 'Reset bone' : `Reset ${reset.length} bones`,
+            title: 'Reset the bind pose: no rotation and a scaling of 1 in the axes of the model, the joints stay; the rest pose and the animations are converted, so the mesh moves as before',
+            icon: 'discard',
+            run: () => resetBones(reset),
+        });
         /** @type {import('./DataTable').TableColumn[]} */
         const columns = [
             {
@@ -1313,6 +1328,12 @@ export class ModelProperties {
                     run: () => showPose(skeleton, pose),
                     isDisabled: () => isPose(skeleton, pose),
                 }, {
+                    label: 'Reset bones',
+                    title: 'Reset the bind pose of all bones: no rotation and a scaling of 1 in the axes of the model, the joints stay (so do the bone lengths); the rest pose and the animations are converted, so the mesh moves as before (right click selected bones to reset only them)',
+                    icon: 'discard',
+                    isHidden: () => pose !== 'bind',
+                    run: () => resetBones(bones),
+                }, {
                     label: 'Move children',
                     title: () => moveChildren
                         ? 'Editing a bind value moves the child joints with the bone (click to keep them in place)'
@@ -1357,9 +1378,14 @@ export class ModelProperties {
                     },
                 },
                 // Right click on a bone: its commands
-                rowMenu: (row, rows) => (rows.length > 1
-                    ? ModelProperties._bonesMenu(rows.map(index => bones[index]), { highlighter, deleteBones })
-                    : ModelProperties._boneMenu(bones[row], { history, highlighter, promptText, deleteBones })),
+                rowMenu: (row, rows) => {
+                    const picked = rows.length > 1 ? rows.map(index => bones[index]) : [bones[row]].filter(Boolean);
+                    const menu = rows.length > 1
+                        ? ModelProperties._bonesMenu(picked, { highlighter, deleteBones })
+                        : ModelProperties._boneMenu(bones[row], { history, highlighter, promptText, deleteBones });
+                    // In the Bind table the picked bones can be reset
+                    return pose === 'bind' && picked.length ? [...menu, resetAction(picked)] : menu;
+                },
                 onSelectRow: row => highlighter.selectBone(bones[row] ?? null),
                 // Shift+click selects several bones: all are highlighted
                 onSelectRows: rows => highlighter.selectBones(rows.map(index => bones[index])),

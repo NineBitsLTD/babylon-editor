@@ -176,6 +176,56 @@ export class ClipRetarget {
     }
 
     /**
+     * The clip as its difference from the rest pose of the source, laid on the rest pose of the
+     * target, bone by bone in local space: the rotation of a key against the source rest turns the
+     * target rest the same way in the axes of the bone (r = restT · restS⁻¹ · q, as quaternions), the
+     * position moves from the target rest as far as from the source rest, the scaling is the target
+     * rest scaling times the ratio to the source rest. Bones are matched by bone or linked node
+     * name; tracks of other targets stay as they are.
+     * @param {CopiedClip} clip
+     * @param {Rig} sourceRig the rig the clip was made for
+     * @param {Rig} targetRig
+     * @returns {{ clip: CopiedClip, matched: number }} matched: the number of converted tracks
+     */
+    static difference(clip, sourceRig, targetRig) {
+        const rests = (rig) => {
+            /** @type {Map<string, { position: BABYLON.Vector3, rotation: BABYLON.Quaternion, scaling: BABYLON.Vector3 }>} */
+            const map = new Map();
+            for (const bone of rig.bones) {
+                const rest = { position: new BABYLON.Vector3(), rotation: new BABYLON.Quaternion(), scaling: new BABYLON.Vector3(1, 1, 1) };
+                BABYLON.Matrix.FromArray(bone.rest).decompose(rest.scaling, rest.rotation, rest.position);
+                map.set(bone.name, rest);
+                if (bone.node) map.set(bone.node, rest);
+            }
+            return map;
+        };
+        const source = rests(sourceRig);
+        const target = rests(targetRig);
+        const ratio = (to, from) => (from ? to / from : 1);
+        const tracks = [];
+        let matched = 0;
+        for (const track of clip.tracks) {
+            const from = source.get(track.target?.name);
+            const to = target.get(track.target?.name);
+            if (!from || !to) {
+                tracks.push(track);
+                continue;
+            }
+            const inverse = BABYLON.Quaternion.Inverse(from.rotation);
+            const scales = new BABYLON.Vector3(ratio(to.scaling.x, from.scaling.x), ratio(to.scaling.y, from.scaling.y), ratio(to.scaling.z, from.scaling.z));
+            tracks.push(ClipRetarget._track(track, {
+                rotation: q => to.rotation.multiply(inverse.multiply(q)),
+                move: v => v.clone(),
+                position: p => to.position.add(p.subtract(from.position)),
+                scaling: to.scaling.clone(),
+                scale: v => v.multiply(scales),
+            }));
+            matched++;
+        }
+        return { clip: { ...clip, tracks }, matched };
+    }
+
+    /**
      * @param {Rig} rig
      * @returns {Map<string, RigPose>} the world rest pose of each bone, by bone and by node name
      */
@@ -267,13 +317,14 @@ export class ClipRetarget {
 
     /**
      * @param {CopiedTrack} track
-     * @param {ReturnType<typeof ClipRetarget._mapping>} mapping
-     * @returns {CopiedTrack | null} the track with retargeted keys; null for a scaling track (the
-     *   target keeps its own scaling)
+     * @param {ReturnType<typeof ClipRetarget._mapping> & { scale?: (s: BABYLON.Vector3) => BABYLON.Vector3 }} mapping
+     *   scale (linear, also for tangents) maps the scalings; without it a scaling is that of the target rest
+     * @returns {CopiedTrack | null} the track with retargeted keys; null for a scaling track without
+     *   `scale` (the target keeps its own scaling)
      */
     static _track(track, mapping) {
         const property = track.animation.property;
-        if (property === 'scaling') return null;
+        if (property === 'scaling' && !mapping.scale) return null;
         const animation = BABYLON.Animation.Parse(track.animation);
         /** @type {(key: BABYLON.IAnimationKey) => BABYLON.IAnimationKey} */
         let mapKey;
@@ -281,8 +332,9 @@ export class ClipRetarget {
             mapKey = (key) => {
                 const position = new BABYLON.Vector3();
                 const rotation = new BABYLON.Quaternion();
-                key.value.decompose(new BABYLON.Vector3(), rotation, position);
-                return { ...key, value: BABYLON.Matrix.Compose(mapping.scaling, mapping.rotation(rotation), mapping.position(position)) };
+                const scaling = new BABYLON.Vector3(1, 1, 1);
+                key.value.decompose(scaling, rotation, position);
+                return { ...key, value: BABYLON.Matrix.Compose(mapping.scale ? mapping.scale(scaling) : mapping.scaling, mapping.rotation(rotation), mapping.position(position)) };
             };
         } else if (property === 'rotationQuaternion') {
             mapKey = key => ({
@@ -305,6 +357,13 @@ export class ClipRetarget {
                 value: mapping.position(key.value),
                 ...(key.inTangent ? { inTangent: mapping.move(key.inTangent) } : {}),
                 ...(key.outTangent ? { outTangent: mapping.move(key.outTangent) } : {}),
+            });
+        } else if (property === 'scaling') {
+            mapKey = key => ({
+                ...key,
+                value: mapping.scale(key.value),
+                ...(key.inTangent ? { inTangent: mapping.scale(key.inTangent) } : {}),
+                ...(key.outTangent ? { outTangent: mapping.scale(key.outTangent) } : {}),
             });
         } else {
             return track;

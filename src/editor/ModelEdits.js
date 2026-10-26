@@ -77,7 +77,7 @@ function isMirrored(node) {
  * @typedef {{ choose: 'skeleton' | 'channels', title?: string, options: { id: string, label: string, description: string }[] } | { report: string }} PasteResult
  */
 
-/** @typedef {'all' | 'rotations' | 'retarget'} ClipChannels how the channels of a pasted clip are taken */
+/** @typedef {'all' | 'rotations' | 'retarget' | 'difference'} ClipChannels how the channels of a pasted clip are taken */
 
 /** Key frames closer than this are one frame. */
 const FRAME_EPSILON = 1e-6;
@@ -824,12 +824,13 @@ export class ModelEdits {
                     : `${copied.name || 'The clip'} comes from another skeleton: take`,
                 options: [
                     ...(canRetarget ? [{ id: 'retarget', label: `Retarget to ${rigSkeleton.name || 'the skeleton'}`, description: 'rotations against the rest poses, moves scaled to the size of the skeleton; bone lengths stay' }] : []),
-                    { id: 'all', label: 'Positions, rotations and scalings', description: 'as in the copied clip' },
+                    { id: 'all', label: 'As is', description: 'positions, rotations and scalings as in the copied clip' },
+                    ...(canRetarget ? [{ id: 'difference', label: 'Difference from the rest pose', description: `each bone moves from the rest pose of ${rigSkeleton.name || 'the skeleton'} as the copied bone from its own` }] : []),
                     { id: 'rotations', label: 'Rotations only', description: 'positions and scalings of the rest pose' },
                 ],
             };
         }
-        const channels = choices.channels === 'retarget' && !canRetarget ? 'all' : choices.channels ?? 'all';
+        const channels = (choices.channels === 'retarget' || choices.channels === 'difference') && !canRetarget ? 'all' : choices.channels ?? 'all';
         const name = uniqueName(copied.name || 'Clip', this._animations.clips.map(clip => clip.name));
         const { clip: source, note } = this._convertClip(copied, kind, skeleton, nodes, channels, rigSkeleton);
         const targetOf = target => (target?.kind === 'bone' ? skeleton?.bones.find(bone => bone.name === target.name) : nodes.get(target?.name)) ?? null;
@@ -875,6 +876,11 @@ export class ModelEdits {
             const retargeted = ClipRetarget.retarget(clip, rig, ClipRetarget.rigOf(rigSkeleton, container));
             clip = retargeted.clip;
             note = `; retargeted to ${rigSkeleton.name || 'the skeleton'} (${retargeted.matched} tracks, size ×${Number(retargeted.scale.toPrecision(3))})`;
+        } else if (channels === 'difference') {
+            const rig = mirror ? ClipRetarget.mirrorRig(copied.rig) : copied.rig;
+            const difference = ClipRetarget.difference(clip, rig, ClipRetarget.rigOf(rigSkeleton, container));
+            clip = difference.clip;
+            note = `; as the difference from the rest pose (${difference.matched} tracks)`;
         } else if (channels === 'rotations' && kind === clip.type) {
             clip = ClipConverter.rotationsOnly(clip, restOf);
         }
@@ -1296,6 +1302,25 @@ export class ModelEdits {
                 if (generator && binding.pathOf(generator)) ops.push({ op: 'remove', path: binding.pathOf(generator) });
                 break;
             }
+            case 'skeleton': {
+                // The meshes keep the shape of the bind pose, as they are drawn, without the skin
+                const written = new Set();
+                for (const { mesh, users, data } of this._bindPoseVertices(object)) {
+                    const holder = binding.vertexHolderPath(mesh);
+                    if (holder && !written.has(JSON.stringify(holder))) {
+                        written.add(JSON.stringify(holder));
+                        data.forEach((values, kind) => ops.push({ op: 'set', path: [...holder, VERTEX_PROPERTIES[kind]], value: values ? Array.from(values, float32) : null }));
+                    }
+                    for (const user of users) {
+                        const path = binding.pathOf(user);
+                        if (!path) continue;
+                        ops.push({ op: 'set', path: [...path, 'skeletonId'], value: null });
+                        ops.push({ op: 'set', path: [...path, 'skeletonUniqueId'], value: null });
+                        ops.push({ op: 'set', path: [...path, 'numBoneInfluencers'], value: 0 });
+                    }
+                }
+                break;
+            }
         }
         ops.push({ op: 'remove', path: pathOf(object) });
         return ops;
@@ -1381,6 +1406,45 @@ export class ModelEdits {
         return json;
     }
 
+    /**
+     * The vertex data a skeleton leaves on the meshes it deforms when it is deleted: the positions
+     * and normals of its bind pose as they are drawn (skinned, so a skeleton that turns or scales
+     * the mesh — e.g. the armature of a converted glTF model — keeps doing so), the bone influences
+     * removed (null). The bind pose is shown for that. Morph targets are not skinned.
+     * @param {BABYLON.Skeleton} skeleton
+     * @returns {{ mesh: BABYLON.Mesh, users: BABYLON.Mesh[], data: Map<string, Float32Array | null> }[]} one per geometry
+     */
+    _bindPoseVertices(skeleton) {
+        const geometries = new Set();
+        const meshes = this._container().meshes.filter((mesh) => {
+            if (!(mesh instanceof BABYLON.Mesh) || mesh.skeleton !== skeleton || !mesh.isVerticesDataPresent(BABYLON.VertexBuffer.PositionKind)) return false;
+            if (mesh.geometry && geometries.has(mesh.geometry)) return false;
+            if (mesh.geometry) geometries.add(mesh.geometry);
+            return true;
+        });
+        if (!meshes.length) return [];
+        this._animations.showPose(skeleton, 'bind');
+        // The linked nodes (glTF joints) and their parents from the top, then the bone matrices
+        const nodes = new Set();
+        const addNode = (node) => {
+            if (!node || nodes.has(node)) return;
+            addNode(node.parent);
+            nodes.add(node);
+        };
+        skeleton.bones.forEach(bone => addNode(bone.getTransformNode()));
+        nodes.forEach(node => node.computeWorldMatrix(true));
+        skeleton.prepare(true);
+        const influences = [BABYLON.VertexBuffer.MatricesIndicesKind, BABYLON.VertexBuffer.MatricesWeightsKind, BABYLON.VertexBuffer.MatricesIndicesExtraKind, BABYLON.VertexBuffer.MatricesWeightsExtraKind];
+        return meshes.map((mesh) => {
+            /** @type {Map<string, Float32Array | null>} */
+            const data = new Map([[BABYLON.VertexBuffer.PositionKind, Float32Array.from(mesh.getPositionData(true, false))]]);
+            if (mesh.isVerticesDataPresent(BABYLON.VertexBuffer.NormalKind)) data.set(BABYLON.VertexBuffer.NormalKind, Float32Array.from(mesh.getNormalsData(true, false)));
+            influences.filter(kind => mesh.isVerticesDataPresent(kind)).forEach(kind => data.set(kind, null));
+            const users = mesh.geometry?.meshes.filter(user => user.skeleton === skeleton) ?? [mesh];
+            return { mesh, users, data };
+        });
+    }
+
     // --- other formats: the scene -----------------------------------------------------------------
 
     /**
@@ -1396,6 +1460,28 @@ export class ModelEdits {
             container.meshes.filter(mesh => mesh.material === object).forEach(mesh => references.push([mesh, 'material', object]));
         } else if (data.kind === 'skeleton') {
             container.meshes.filter(mesh => mesh.skeleton === object).forEach(mesh => references.push([mesh, 'skeleton', object]));
+            // The meshes keep the shape of the bind pose; undo puts the skinned vertices back
+            const baked = this._bindPoseVertices(object).map(({ mesh, data: after }) => ({
+                mesh,
+                after,
+                before: new Map([...after.keys()].map(kind => [kind, Float32Array.from(mesh.getVerticesData(kind))])),
+            }));
+            const write = (mesh, values) => values.forEach((array, kind) => {
+                if (array) mesh.setVerticesData(kind, Float32Array.from(array), true, BABYLON.VertexBuffer.DeduceStride(kind));
+                else mesh.removeVerticesData(kind);
+            });
+            this._structural(`Delete ${this.info(data).label}`,
+                () => {
+                    references.forEach(([target, key]) => { target[key] = null; });
+                    baked.forEach(({ mesh, after }) => { write(mesh, after); mesh.refreshBoundingInfo(); });
+                    this._detach(object);
+                },
+                () => {
+                    this._attach(object);
+                    baked.forEach(({ mesh, before }) => { write(mesh, before); mesh.refreshBoundingInfo(); });
+                    references.forEach(([target, key, value]) => { target[key] = value; });
+                });
+            return;
         } else if (data.kind === 'texture') {
             for (const material of container.materials) {
                 for (const key of Object.keys(material)) {

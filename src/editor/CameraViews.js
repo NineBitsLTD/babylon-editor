@@ -138,6 +138,7 @@ export class CameraViews {
      * @param {(ref: string | null) => ViewSettings} options.defaults the settings of a camera not set yet
      * @param {() => boolean} options.isSkeletonMode the bones are shown (the views hide meshes / bones as set)
      * @param {(index: number) => void} options.onSelect another view was selected (the view bar shows its settings)
+     * @param {(index: number) => void} options.onDoubleClick a view was double-clicked (on the canvas)
      * @param {(settings: ViewSettings) => void} options.onBeforeView a view is about to be rendered
      *   (its global render settings are applied)
      * @param {() => void} options.onAfterView a view was rendered (its render settings are undone)
@@ -145,7 +146,7 @@ export class CameraViews {
      *   what the shown views show over the model (the helpers are made only then)
      * @param {CameraViewsState} [options.state]
      */
-    constructor({ scene, viewport, previews, onTagClick, onChange, defaults, isSkeletonMode, onSelect, onBeforeView, onAfterView, onOverlaysNeeded, state }) {
+    constructor({ scene, viewport, previews, onTagClick, onChange, defaults, isSkeletonMode, onSelect, onDoubleClick, onBeforeView, onAfterView, onOverlaysNeeded, state }) {
         this._scene = scene;
         this._viewport = viewport;
         this._previews = previews;
@@ -154,6 +155,7 @@ export class CameraViews {
         this._defaults = defaults;
         this._isSkeletonMode = isSkeletonMode;
         this._onSelect = onSelect;
+        this._onDoubleClick = onDoubleClick;
         this._onOverlaysNeeded = onOverlaysNeeded;
         /** @type {Record<string, ViewSettings>} settings of each camera, by ref */
         this._settings = state?.settings && typeof state.settings === 'object' ? { ...state.settings } : {};
@@ -345,6 +347,22 @@ export class CameraViews {
         this._slots[index] = ref;
         this.apply();
         // The view bar shows the settings of the camera now in the selected view
+        this._onSelect(this._selected);
+        this._onChange();
+    }
+
+    /** @returns {string[]} the camera of each view (also of views the layout does not show now) */
+    get slots() {
+        return [...this._slots];
+    }
+
+    /**
+     * Shows the cameras of {@link slots} again.
+     * @param {string[]} slots
+     */
+    setSlots(slots) {
+        this._slots = [...slots];
+        this.apply();
         this._onSelect(this._selected);
         this._onChange();
     }
@@ -604,6 +622,10 @@ export class CameraViews {
             // A click on the canvas (not on a tag or the player bars) selects the view
             if (event.target === this._scene.getEngine().getRenderingCanvas()) this.select(index);
         }, true);
+        this._viewport.addEventListener('dblclick', (event) => {
+            if (event.target !== this._scene.getEngine().getRenderingCanvas()) return;
+            this._onDoubleClick(this._count < 2 ? 0 : viewAt(event));
+        });
         this._viewport.addEventListener('wheel', focusAt, true);
         this._viewport.addEventListener('pointermove', (event) => {
             if (!event.buttons) focusAt(event);
