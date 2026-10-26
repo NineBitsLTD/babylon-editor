@@ -56,6 +56,8 @@ import { textureFileSize, texturePreview } from './TextureImage';
  *   mesh and the triangles that use them (null when the format cannot be edited)
  * @property {((mesh: BABYLON.Mesh, vertices: number[]) => void) | null} mergeVertices merges vertices of a
  *   mesh into one at their centre
+ * @property {((skeleton: BABYLON.Skeleton, parent: BABYLON.Bone | null) => void) | null} addBone asks a name and adds a
+ *   bone below the parent (a root bone without one); `.babylon` texts only
  * @property {((bones: BABYLON.Bone[]) => void) | null} deleteBones deletes bones with their weights and
  *   node (null when the model has no `.babylon` text)
  */
@@ -1251,7 +1253,7 @@ export class ModelProperties {
      * @param {PropertiesContext} context
      * @returns {PanelContent}
      */
-    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber, promptText, deleteBones }) {
+    static _skeleton(skeleton, { animations, highlighter, showPose, isPose, history, container, binding, promptNumber, promptText, addBone, deleteBones, selectedRow }) {
         const bones = skeleton.bones;
         const groups = ['position', 'rotation', 'scaling'];
         /** @type {'rest' | 'bind'} set by the Rest | Bind switch of the panel */
@@ -1385,6 +1387,15 @@ export class ModelProperties {
                     run: () => showPose(skeleton, pose),
                     isDisabled: () => isPose(skeleton, pose),
                 }, {
+                    label: 'Add bone…',
+                    title: () => `Add a bone below the selected bone (a root bone when none is selected), where the parent points; one undo step${addBone ? '' : ' — .babylon documents only'}`,
+                    icon: 'add',
+                    isDisabled: () => !addBone,
+                    run: () => {
+                        const row = selectedRow();
+                        addBone?.(skeleton, bones[row] ?? null);
+                    },
+                }, {
                     label: 'Reset bones',
                     title: 'Reset the bind pose of all bones: no rotation and a scaling of 1 in the axes of the model, the joints stay (so do the bone lengths); the rest pose and the animations are converted, so the mesh moves as before (right click selected bones to reset only them)',
                     icon: 'discard',
@@ -1440,6 +1451,9 @@ export class ModelProperties {
                     const menu = rows.length > 1
                         ? ModelProperties._bonesMenu(picked, { highlighter, deleteBones })
                         : ModelProperties._boneMenu(bones[row], { history, highlighter, promptText, deleteBones });
+                    if (rows.length <= 1 && bones[row]) {
+                        menu.unshift({ label: 'Add child bone…', title: 'Add a bone below this one, where it points', icon: 'add', isDisabled: () => !addBone, run: () => addBone?.(skeleton, bones[row]) });
+                    }
                     // In the Bind table the picked bones can be reset
                     return pose === 'bind' && picked.length ? [...menu, resetAction(picked)] : menu;
                 },

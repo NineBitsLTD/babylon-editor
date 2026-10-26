@@ -22,7 +22,7 @@ import { BONE_AXES_LAYER, NORMALS_LAYER, VERTICES_LAYER } from './ViewRendering'
  * mode, the vertices (points over any mode), the normals of the vertices, the axes of the bones
  * and, in skeleton mode, the meshes and the bones. The
  * settings belong to the camera: they move with it to another view.
- * @typedef {{ renderMode: import('./Toolbar').RenderMode, vertices?: boolean, normals?: boolean, boneAxes?: boolean, display: import('./SelectionHighlighter').SkeletonDisplay }} ViewSettings
+ * @typedef {{ renderMode: import('./Toolbar').RenderMode, vertices?: boolean, normals?: boolean, boneAxes?: boolean, ground?: boolean, display: import('./SelectionHighlighter').SkeletonDisplay }} ViewSettings
  */
 
 /**
@@ -142,7 +142,7 @@ export class CameraViews {
      * @param {(settings: ViewSettings) => void} options.onBeforeView a view is about to be rendered
      *   (its global render settings are applied)
      * @param {() => void} options.onAfterView a view was rendered (its render settings are undone)
-     * @param {(needs: { vertices: boolean, normals: boolean, boneAxes: boolean }) => void} options.onOverlaysNeeded
+     * @param {(needs: { vertices: boolean, normals: boolean, boneAxes: boolean, ground: boolean }) => void} options.onOverlaysNeeded
      *   what the shown views show over the model (the helpers are made only then)
      * @param {CameraViewsState} [options.state]
      */
@@ -257,16 +257,17 @@ export class CameraViews {
      */
     applyMasks() {
         const skeletonMode = this._isSkeletonMode();
-        const needs = { vertices: false, normals: false, boneAxes: false };
+        const needs = { vertices: false, normals: false, boneAxes: false, ground: false };
         this._shown.forEach((camera, index) => {
             if (!camera) return;
-            const { display, vertices, normals, boneAxes } = this.settingsOf(index);
+            const { display, vertices, normals, boneAxes, ground } = this.settingsOf(index);
             const mesh = !skeletonMode || display.mesh;
             camera.layerMask = (mesh ? MODEL_LAYER : 0) | (!skeletonMode || display.bones ? BONES_LAYER : 0)
                 | (mesh && vertices ? VERTICES_LAYER : 0) | (mesh && normals ? NORMALS_LAYER : 0) | (boneAxes ? BONE_AXES_LAYER : 0);
             needs.vertices ||= mesh && !!vertices;
             needs.normals ||= mesh && !!normals;
             needs.boneAxes ||= !!boneAxes;
+            needs.ground ||= !!ground;
         });
         this._onOverlaysNeeded(needs);
     }

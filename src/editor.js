@@ -22,10 +22,10 @@ import { ModelProperties } from './editor/ModelProperties';
 import { ModelSerializer } from './editor/ModelSerializer';
 import { PropertyPanel } from './editor/PropertyPanel';
 import { SelectionHighlighter } from './editor/SelectionHighlighter';
-import { MODEL_LAYER } from './editor/SkeletonView';
+import { BONES_LAYER, MODEL_LAYER } from './editor/SkeletonView';
 import { TextureImage } from './editor/TextureImage';
 import { TransformEditing } from './editor/TransformEditing';
-import { ViewRendering } from './editor/ViewRendering';
+import { VERTICES_LAYER, ViewRendering } from './editor/ViewRendering';
 import { Toolbar } from './editor/Toolbar';
 
 const vscode = acquireVsCodeApi();
@@ -217,7 +217,9 @@ class Editor {
             onDoubleClick: index => this._toggleModelView(index),
             onBeforeView: settings => this._viewRendering.beforeView(settings),
             onAfterView: () => this._viewRendering.afterView(),
-            onOverlaysNeeded: ({ vertices, normals, boneAxes }) => {
+            onOverlaysNeeded: ({ vertices, normals, boneAxes, ground }) => {
+                this._viewRendering.setGroundNeeded(ground);
+                this._placeGround();
                 this._viewRendering.setPointsNeeded(vertices);
                 this._viewRendering.setNormalsNeeded(normals);
                 this._viewRendering.setAxesNeeded(boneAxes);
@@ -231,6 +233,8 @@ class Editor {
         this._view = view;
         /** @type {'model' | 'inspector'} */
         this._singleView = singleView;
+        /** The ground was clicked in the edit mode: the gizmo moves it */
+        this._groundPicked = false;
         /** @type {{ slots: string[], selected: number } | null} the desktop a double click on a view left */
         this._desktopReturn = null;
         this._narrow = false;
@@ -601,6 +605,8 @@ class Editor {
             // Shift adds to the selection (or takes out a selected one), Option / Alt takes out
             const mode = selectionMode(info.event ?? {});
             const { pointerX: x, pointerY: y } = this._scene;
+            // A click lets go of the ground; in the edit mode a click on it (nothing in front) lets the gizmo move it
+            this._groundPicked = false;
             const bone = this._highlighter.pickBone(x, y);
             if (bone) {
                 if (mode === 'remove') {
@@ -617,6 +623,14 @@ class Editor {
                 this._revealBone(bone);
                 return;
             }
+            // Vertices are picked only in a view that shows them
+            const vertices = this._viewShows().vertices;
+            const nearVertex = vertices && this._selectedMesh() ? this._highlighter.pickVertex(this._selectedMesh(), x, y, this._vertexOccluders()) >= 0 : false;
+            if (!nearVertex && this._cursor === 'edit' && mode === 'replace' && this._pickGround(x, y)) {
+                this._groundPicked = true;
+                return;
+            }
+            if (!vertices) return;
             const occluders = this._vertexOccluders();
             const mesh = this._selectedMesh();
             const vertex = mesh ? this._highlighter.pickVertex(mesh, x, y, occluders) : -1;
@@ -625,11 +639,28 @@ class Editor {
                 else this._panel.revealObject({ vertex }, mode === 'add');
                 return;
             }
-            // A vertex of another mesh opens that mesh with it selected (in the edit mode or while the view shows the vertices)
-            if (mode === 'remove' || !(this._cursor === 'edit' || this._selectedViewSettings().vertices)) return;
+            // A vertex of another mesh opens that mesh with it selected
+            if (mode === 'remove') return;
             const found = this._highlighter.pickVertexIn(this._pickableMeshes(), x, y, occluders);
             if (found) this._openWithSelection({ kind: 'node', node: found.mesh }, [{ vertex: found.vertex }]);
         });
+    }
+
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @returns {boolean} the ground, shown in the view under the pointer, is under the point and no
+     *   model mesh is in front of it
+     */
+    _pickGround(x, y) {
+        const ground = this._viewRendering.ground;
+        if (!ground || !this._cameraViews.settingsOf(this._cameraViews.focus).ground) return false;
+        const camera = this._scene.cameraToUseForPointers ?? this._scene.activeCamera;
+        const hit = this._scene.pick(x, y, mesh => mesh === ground, false, camera);
+        if (!hit?.hit) return false;
+        const meshes = this._pickableMeshes();
+        const model = this._scene.pick(x, y, mesh => meshes.includes(mesh), false, camera);
+        return !model?.hit || model.distance > hit.distance;
     }
 
     /** @returns {BABYLON.Mesh | null} the mesh the inspector shows (its vertex table) */
@@ -686,37 +717,53 @@ class Editor {
     }
 
     /**
+     * What the view under the pointer shows that can be selected and moved: the bones of the shown
+     * skeleton and the vertex points (the bones and points toggles of the view, through the layer
+     * mask of its camera).
+     * @returns {{ bones: boolean, vertices: boolean }}
+     */
+    _viewShows() {
+        const camera = this._scene.cameraToUseForPointers ?? this._scene.activeCamera;
+        const mask = camera?.layerMask ?? 0;
+        return { bones: !!this._highlighter.shownSkeleton && (mask & BONES_LAYER) !== 0, vertices: (mask & VERTICES_LAYER) !== 0 };
+    }
+
+    /**
      * What the gizmo moves in the edit mode: the selected bones of the bone table (skeleton or clip
-     * inspector) while the view shows the bones, else the selected vertices of the mesh shown.
+     * inspector) while the view under the pointer shows the bones, else the selected vertices of the
+     * mesh shown while it shows the vertices.
      * @returns {import('./editor/TransformEditing').EditSelection}
      */
     _editSelection() {
         if (this._cursor !== 'edit') return null;
+        const ground = this._viewRendering.ground;
+        if (this._groundPicked && ground && this._cameraViews.settingsOf(this._cameraViews.focus).ground) {
+            return { kind: 'node', node: ground, rows: [0], onMoved: () => this._viewRendering.markGroundMoved() };
+        }
         const table = this._panel.table;
         const rows = this._panel.selectedRows;
-        if (table?.poseEdit && this._highlighter.shownSkeleton && this._selectedViewSettings().display.bones) {
-            return { kind: 'bones', rows, pose: table.poseEdit };
-        }
+        const shows = this._viewShows();
+        if (table?.poseEdit && shows.bones) return { kind: 'bones', rows, pose: table.poseEdit };
         const mesh = this._selectedMesh();
-        return mesh ? { kind: 'vertices', mesh, rows } : null;
+        return mesh && shows.vertices ? { kind: 'vertices', mesh, rows } : null;
     }
 
     /**
      * Selects what a rectangle of the view holds: the bones of the shown skeleton (their joints)
-     * while the inspector has a bone table, else the vertices of the mesh the inspector shows —
-     * those no polygon hides, unless the view shows lines.
+     * while the view shows them, else the vertices of the mesh the inspector shows while the view
+     * shows the vertices — those no polygon hides, unless the view shows lines.
      * @param {import('./editor/ScreenSelection').ScreenRect} rect
      * @param {import('./editor/BoxSelection').SelectionMode} mode
      */
     _selectInRect(rect, mode) {
-        const settings = this._selectedViewSettings();
         const skeleton = this._highlighter.shownSkeleton;
-        const showsBones = !!skeleton && settings.display.bones;
-        if (showsBones) {
+        const shows = this._viewShows();
+        if (shows.bones) {
             const mesh = this._container?.meshes.find(candidate => candidate.skeleton === skeleton) ?? null;
             const bones = ScreenSelection.bonesInRect(this._scene, skeleton, mesh, rect).filter(bone => !this._highlighter.isBoneHidden(bone));
             if (this._selectBones(bones, mode)) return;
         }
+        if (!shows.vertices) return;
         const occluders = this._vertexOccluders();
         const mesh = this._selectedMesh();
         const vertices = mesh ? ScreenSelection.verticesInRect(this._scene, mesh, rect, occluders) : [];
@@ -1256,6 +1303,18 @@ class Editor {
             mergeMeshes: this._binding && this._canEdit ? (meshes, name) => this._report(() => this._edits.mergeMeshes(meshes, name)) : null,
             deleteVertices: this._canEdit ? (mesh, vertices) => this._report(() => this._edits.deleteVertices(mesh, vertices)) : null,
             mergeVertices: this._canEdit ? (mesh, vertices) => this._report(() => this._edits.mergeVertices(mesh, vertices)) : null,
+            addBone: this._binding && this._canEdit ? async (skeleton, parent) => {
+                const names = skeleton.bones.map(bone => bone.name);
+                let suggested = parent ? `${parent.name}_child` : 'Root';
+                for (let count = 2; names.includes(suggested); count++) suggested = `${parent ? `${parent.name}_child` : 'Root'}${count}`;
+                const name = (await this._host.request('inputBox', { title: parent ? `Add a bone below ${parent.name}` : `Add a root bone to ${skeleton.name || 'the skeleton'}`, prompt: 'Name of the new bone', value: suggested }))?.trim();
+                if (!name) return;
+                try {
+                    this._host.send('showMessage', { level: 'info', text: this._edits.addBone(skeleton, parent, name) });
+                } catch (error) {
+                    this._host.send('showMessage', { level: 'error', text: String(error?.message || error) });
+                }
+            } : null,
             deleteBones: this._binding && this._canEdit ? (bones) => {
                 try {
                     const report = this._edits.deleteBones(bones);
@@ -1376,10 +1435,91 @@ class Editor {
     }
 
     /**
+     * @returns {BABYLON.AbstractMesh[]} the meshes the ground lies under: those of the selected node
+     *   (with the meshes below it) or skeleton, else all meshes of the model
+     */
+    _groundMeshes() {
+        const container = this._container;
+        if (!container) return [];
+        const data = this._selection?.data;
+        const own = new Set(container.meshes);
+        let meshes = [];
+        if (data?.kind === 'node') meshes = [data.node, ...data.node.getDescendants(false, child => own.has(child))];
+        else if (data?.kind === 'skeleton') meshes = container.meshes.filter(mesh => mesh.skeleton === data.skeleton);
+        meshes = meshes.filter(mesh => own.has(mesh) && mesh.getTotalVertices() > 0);
+        return meshes.length ? meshes : container.meshes;
+    }
+
+    /** The ground lies under the selected object, at its lowest point at rest. */
+    _placeGround() {
+        const meshes = this._groundMeshes();
+        this._viewRendering.setGroundTarget(meshes, () => this._restBottom(meshes));
+    }
+
+    /**
+     * The lowest point of meshes in the rest pose, as drawn (skinned meshes through their skeleton
+     * put into the rest pose for the time of the measure; the pose shown is put back).
+     * @param {BABYLON.AbstractMesh[]} meshes
+     * @returns {number} the lowest world height, or NaN without vertices
+     */
+    _restBottom(meshes) {
+        const skeletons = new Set(meshes.map(mesh => mesh.skeleton).filter(Boolean));
+        const bones = [...skeletons].flatMap(skeleton => skeleton.bones);
+        const saved = bones.map((bone) => {
+            const node = bone.getTransformNode();
+            return { bone, node, matrix: bone.getLocalMatrix().clone(), position: node?.position.clone(), rotation: node?.rotation.clone(), quaternion: node?.rotationQuaternion?.clone() ?? null, scaling: node?.scaling.clone() };
+        });
+        // The linked nodes (and their parents) from the top, then the bone matrices
+        const nodes = new Set();
+        const addNode = (node) => {
+            if (!node || nodes.has(node)) return;
+            addNode(node.parent);
+            nodes.add(node);
+        };
+        bones.forEach(bone => addNode(bone.getTransformNode()));
+        const prepare = () => {
+            nodes.forEach(node => node.computeWorldMatrix(true));
+            skeletons.forEach(skeleton => skeleton.prepare(true));
+        };
+        bones.forEach(bone => bone.returnToRest());
+        prepare();
+        let bottom = Infinity;
+        for (const mesh of meshes) {
+            if (!mesh.getTotalVertices()) continue;
+            const world = mesh.computeWorldMatrix(true);
+            if (!mesh.skeleton) {
+                bottom = Math.min(bottom, mesh.getBoundingInfo().boundingBox.minimumWorld.y);
+                continue;
+            }
+            const positions = mesh.getPositionData(true, true) ?? [];
+            const point = new BABYLON.Vector3();
+            for (let index = 0; index < positions.length; index += 3) {
+                BABYLON.Vector3.TransformCoordinatesFromFloatsToRef(positions[index], positions[index + 1], positions[index + 2], world, point);
+                bottom = Math.min(bottom, point.y);
+            }
+        }
+        // The pose shown comes back (a copy: returnToRest makes the local matrix the rest matrix itself)
+        for (const { bone, node, matrix, position, rotation, quaternion, scaling } of saved) {
+            if (node) {
+                node.position.copyFrom(position);
+                node.rotation.copyFrom(rotation);
+                node.rotationQuaternion = quaternion;
+                node.scaling.copyFrom(scaling);
+            } else {
+                bone._matrix = matrix;
+            }
+            bone.markAsDirty();
+        }
+        prepare();
+        return Number.isFinite(bottom) ? bottom : NaN;
+    }
+
+    /**
      * Shows the selected object in the 3D view and syncs the skeleton mode toggles.
      * @param {import('./editor/ModelOutline').ModelItemData} data
      */
     _highlight(data) {
+        this._placeGround();
         ModelProperties.highlight(data, this._propertiesContext());
         this._syncSkeletonButtons();
         this._updateLayout();

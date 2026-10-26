@@ -65,13 +65,14 @@ export function layoutIcon({ side, count }) {
 
 /** @typedef {'view' | 'edit'} CursorMode the left button turns the camera / selects and edits */
 
-/** @typedef {'vertices' | 'normals' | 'boneAxes'} ViewOverlay what a view can show over the model */
+/** @typedef {'vertices' | 'normals' | 'boneAxes' | 'ground'} ViewOverlay what a view can show over the model */
 
 /** The overlay buttons of the view bar: their tooltips when off / on. */
 const OVERLAYS = {
     vertices: ['Show the vertices (points over the model)', 'Hide the vertices'],
     normals: ['Show the normals of the vertices (lines along them)', 'Hide the normals'],
     boneAxes: ['Show the axes of the bones (X red, Y green, Z blue: how each bone is turned)', 'Hide the axes of the bones'],
+    ground: ['Show the ground: a grid at the lowest point of the selected object at rest (where feet should stand while it moves); in Edit a click on it lets the gizmo move it', 'Hide the ground'],
 };
 
 /** @typedef {'model' | 'inspector' | 'desktop'} EditorView */

@@ -461,6 +461,99 @@ export class ModelEdits {
     }
 
     /**
+     * Adds a bone to a skeleton of a `.babylon` text (one undo step, the model reloads): a child of
+     * `parent` (a root bone without one), no rotation or scaling against it, placed where the parent
+     * points — at its tip node, at the middle of its child joints, else as far again along the
+     * parent bone (the place is the same in the bind and the rest pose, each by its own values). It
+     * gets the next free index, so no vertex follows it until weights are given. When the bones of
+     * the skeleton have linked nodes (glTF joints), it gets one too, below the node of its parent.
+     * @param {BABYLON.Skeleton} skeleton
+     * @param {BABYLON.Bone | null} parent
+     * @param {string} name
+     * @returns {string} what was done
+     */
+    addBone(skeleton, parent, name) {
+        const binding = this._binding();
+        if (!binding) throw new Error('Adding bones needs the .babylon text of the model (models too large for it stay in the binary editor)');
+        const skeletonPath = binding.pathOf(skeleton);
+        if (!skeletonPath) throw new Error(`${skeleton.name || 'The skeleton'} has no place in the file`);
+        const bonesJson = skeletonPath.reduce((value, key) => value?.[key], binding.document)?.bones ?? [];
+        const place = (pose) => {
+            const translation = ModelEdits._newBoneTranslation(skeleton, parent, pose, this._animations);
+            return BABYLON.Matrix.Translation(translation.x, translation.y, translation.z);
+        };
+        const rest = place('rest');
+        let bind = place('bind');
+        const linkedParent = parent ? parent.getTransformNode() : skeleton.bones.find(bone => !bone.getParent() && bone.getTransformNode())?.getTransformNode()?.parent ?? null;
+        const linked = skeleton.bones.some(bone => bone.getTransformNode());
+        // The bind matrix of a glTF root bone is kept in the space of the glTF scene (see AnimationController._bindPose)
+        if (!parent && linkedParent instanceof BABYLON.TransformNode) {
+            let top = linkedParent;
+            while (top.parent) top = /** @type {BABYLON.TransformNode} */ (top.parent);
+            bind = bind.multiply(linkedParent.computeWorldMatrix(true)).multiply(top.computeWorldMatrix(true).clone().invert());
+        }
+        const json = {
+            name,
+            index: Math.max(-1, ...bonesJson.map((bone, index) => Number(bone.index ?? index))) + 1,
+            parentBoneIndex: parent ? skeleton.bones.indexOf(parent) : -1,
+            matrix: Array.from(bind.m, float32),
+            rest: Array.from(rest.m, float32),
+        };
+        /** @type {DocumentOp[]} */
+        const ops = [];
+        if (linked) {
+            const restParts = decomposeTransform(rest);
+            const node = {
+                name,
+                id: newId(),
+                uniqueId: binding.nextFileUniqueId(),
+                position: restParts.position.asArray().map(float32),
+                rotationQuaternion: [0, 0, 0, 1],
+                scaling: [1, 1, 1],
+                isEnabled: true,
+            };
+            if (linkedParent) node.parentId = binding.fileUniqueIdOf(linkedParent) ?? linkedParent.id;
+            ops.push({ op: 'insert', arrayPath: ['transformNodes'], value: node });
+            json.linkedTransformNodeId = node.id;
+            if (bonesJson.some(bone => bone.linkedTransformNodeUniqueId != null)) json.linkedTransformNodeUniqueId = node.uniqueId;
+        }
+        ops.push({ op: 'insert', arrayPath: [...skeletonPath, 'bones'], value: json });
+        this._postOps(`Add bone ${name}`, ops);
+        return `Added ${name}${parent ? ` below ${parent.name}` : ' as a root bone'}${linked ? ' with its joint node' : ''}; give it weights (Automatic weights, the Skin values of vertices) to make it move the mesh`;
+    }
+
+    /**
+     * @param {BABYLON.Skeleton} skeleton
+     * @param {BABYLON.Bone | null} parent
+     * @param {'rest' | 'bind'} pose
+     * @param {import('./AnimationController').AnimationController} animations
+     * @returns {BABYLON.Vector3} where a new child bone of the parent goes, in the space of the parent
+     */
+    static _newBoneTranslation(skeleton, parent, pose, animations) {
+        const local = bone => animations.poseMatrix(bone, pose);
+        const lengths = skeleton.bones.filter(bone => bone.getParent()).map(bone => local(bone).getTranslation().length()).filter(length => length > 0);
+        const typical = lengths.length ? lengths.reduce((sum, length) => sum + length, 0) / lengths.length : 1;
+        if (!parent) return BABYLON.Vector3.Zero();
+        const joints = jointNodes([skeleton]);
+        const tip = parent.getTransformNode()?.getChildren().find(child => isJointTip(child, joints));
+        if (tip) return /** @type {BABYLON.TransformNode} */ (tip).position.clone();
+        const children = parent.getChildren();
+        if (children.length) {
+            const sum = children.reduce((total, child) => total.addInPlace(local(child).getTranslation()), BABYLON.Vector3.Zero());
+            return sum.scaleInPlace(1 / children.length);
+        }
+        // The parent bone continued: its own offset, turned into its space
+        const own = local(parent);
+        const offset = own.getTranslation();
+        if (offset.length() > 0) {
+            const linear = own.clone();
+            linear.setTranslationFromFloats(0, 0, 0);
+            return BABYLON.Vector3.TransformNormal(offset, linear.invert());
+        }
+        return new BABYLON.Vector3(0, typical, 0);
+    }
+
+    /**
      * Welds the vertices of a mesh at one position into one with smooth normals (`MeshWeld`), for
      * every mesh sharing its geometry: in a `.babylon` text as document ops (the model reloads),
      * else in the scene as an undoable command.

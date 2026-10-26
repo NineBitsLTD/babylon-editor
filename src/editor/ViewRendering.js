@@ -1,4 +1,5 @@
 import * as BABYLON from '@babylonjs/core';
+import { GridMaterial } from '@babylonjs/materials/grid/gridMaterial';
 
 /** Layer of the vertex points: a view shows them when its camera's mask has it. */
 export const VERTICES_LAYER = 0x20000000;
@@ -68,6 +69,14 @@ export class ViewRendering {
         this._normals = null;
         /** @type {BABYLON.LinesMesh | null} */
         this._axes = null;
+        /** @type {BABYLON.Mesh | null} the ground grid (only while a view shows it) */
+        this._ground = null;
+        /** @type {BABYLON.AbstractMesh[]} the meshes the ground lies under */
+        this._groundTarget = [];
+        /** @type {() => number} the height of the ground (read when it is placed) */
+        this._groundHeight = () => 0;
+        /** The ground was moved by hand: it stays there until it is hidden */
+        this._groundMoved = false;
         // The points follow their meshes (world matrix, visibility); the lines follow the pose
         scene.onBeforeRenderObservable.add(() => {
             this._updatePoints();
@@ -101,6 +110,79 @@ export class ViewRendering {
     }
 
     /**
+     * Draws the ground while a view shows it: a grid at the height given with the target (the
+     * lowest point of the object at rest), centred under the target meshes and a few times their
+     * size, the cells a power of ten (so moves can be read against them); drawn by the views that
+     * show it (`beforeView`), not pickable, not in the model.
+     * @param {boolean} needed
+     */
+    setGroundNeeded(needed) {
+        if (needed && !this._ground) {
+            const ground = BABYLON.MeshBuilder.CreateGround('__editorGround', { width: 1, height: 1 }, this._scene);
+            const material = new GridMaterial('__editorGround', this._scene);
+            // A floor a little darker than the background, lines that stand out from it; see-through,
+            // so what is below the ground still shows
+            Object.assign(material, { majorUnitFrequency: 10, minorUnitVisibility: 0.5, opacity: 0.75, useMaxLine: true, backFaceCulling: false });
+            const background = this._scene.clearColor;
+            material.mainColor = new BABYLON.Color3(background.r, background.g, background.b).scale(0.6);
+            material.lineColor = contrastColor(background);
+            ground.material = material;
+            ground.isPickable = false;
+            ground.doNotSyncBoundingInfo = true;
+            this._ground = ground;
+            this._placeGround();
+        }
+        if (!needed && this._ground) {
+            this._ground.material?.dispose();
+            this._ground.dispose();
+            this._ground = null;
+            this._groundMoved = false;
+        }
+    }
+
+    /** @returns {BABYLON.Mesh | null} the ground while a view shows it */
+    get ground() {
+        return this._ground;
+    }
+
+    /** The ground was moved with the gizmo: the selection no longer places it. */
+    markGroundMoved() {
+        this._groundMoved = true;
+    }
+
+    /**
+     * The meshes the ground lies under (the selected object, else the model).
+     * @param {BABYLON.AbstractMesh[]} meshes
+     * @param {() => number} height the height of the ground in the world, read only while it is shown
+     */
+    setGroundTarget(meshes, height) {
+        this._groundTarget = meshes;
+        this._groundHeight = height;
+        this._placeGround();
+    }
+
+    _placeGround() {
+        const ground = this._ground;
+        if (!ground || this._groundMoved) return;
+        const min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
+        const max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
+        for (const mesh of this._groundTarget) {
+            if (mesh.isDisposed() || !mesh.getTotalVertices()) continue;
+            const box = mesh.getBoundingInfo().boundingBox;
+            min.minimizeInPlace(box.minimumWorld);
+            max.maximizeInPlace(box.maximumWorld);
+        }
+        const found = Number.isFinite(min.x);
+        const size = found ? Math.max(max.x - min.x, max.y - min.y, max.z - min.z) : 1;
+        const extent = Math.max(size, 1e-3) * 4;
+        const height = this._groundHeight();
+        ground.position.set(found ? (min.x + max.x) / 2 : 0, Number.isFinite(height) ? height : 0, found ? (min.z + max.z) / 2 : 0);
+        ground.scaling.set(extent, 1, extent);
+        // A cell of a power of ten, about a twentieth of the object
+        /** @type {GridMaterial} */ (ground.material).gridRatio = 10 ** Math.round(Math.log10(Math.max(size, 1e-3) / 20));
+    }
+
+    /**
      * The model changed: the vertex points are made again.
      * @param {BABYLON.AssetContainer | null} container
      */
@@ -124,9 +206,10 @@ export class ViewRendering {
      * Before a view is drawn.
      * @param {import('./CameraViews').ViewSettings} settings
      */
-    beforeView({ renderMode }) {
+    beforeView({ renderMode, ground }) {
         this._applyTextures(renderMode === 'solid' ? 'solid' : 'textured');
         if (renderMode === 'wireframe') this._useLines();
+        if (this._ground) this._ground.isVisible = !!ground;
     }
 
     /** After a view is drawn: the meshes get their materials back. */

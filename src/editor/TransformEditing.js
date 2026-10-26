@@ -17,7 +17,9 @@ import { drawnVertexPosition } from './SelectionHighlighter';
 
 /**
  * The selection the gizmo moves: bones of a bone table, or vertices of a mesh.
- * @typedef {{ kind: 'bones', rows: number[], pose: PoseEdit } | { kind: 'vertices', mesh: BABYLON.Mesh, rows: number[] } | null} EditSelection
+ * @typedef {{ kind: 'bones', rows: number[], pose: PoseEdit } | { kind: 'vertices', mesh: BABYLON.Mesh, rows: number[] }
+ *   | { kind: 'node', node: BABYLON.TransformNode, rows: number[], onMoved?: () => void } | null} EditSelection
+ *   node: a helper of the view moved as a whole (not recorded: not part of the model), rows `[0]`
  */
 
 const K = BABYLON.VertexBuffer;
@@ -185,6 +187,7 @@ export class TransformEditing {
             const target = row === undefined ? null : selection.pose.objectOf(row);
             return target ? rotationOf(worldOf(target, this._meshOfBones()).world) : BABYLON.Quaternion.Identity();
         }
+        if (selection?.kind === 'node') return rotationOf(selection.node.computeWorldMatrix(true));
         return selection ? rotationOf(selection.mesh.getWorldMatrix()) : BABYLON.Quaternion.Identity();
     }
 
@@ -192,6 +195,7 @@ export class TransformEditing {
     _centre() {
         const selection = this._selection();
         if (!selection?.rows.length) return null;
+        if (selection.kind === 'node') return selection.node.getAbsolutePosition().clone();
         const points = selection.kind === 'bones'
             ? this._rootRows(selection).map(row => worldOf(selection.pose.objectOf(row), this._meshOfBones()).world.getTranslation())
             : selection.rows.slice(0, 2000).map((vertex) => {
@@ -223,6 +227,10 @@ export class TransformEditing {
         const selection = this._selection();
         if (!selection?.rows.length) return;
         const start = this._pivot.computeWorldMatrix(true).clone();
+        if (selection.kind === 'node') {
+            this._drag = { selection, start, world: selection.node.computeWorldMatrix(true).clone() };
+            return;
+        }
         if (selection.kind === 'bones') {
             selection.pose.begin();
             const rows = this._rootRows(selection);
@@ -263,6 +271,16 @@ export class TransformEditing {
     _apply(final) {
         const drag = this._drag;
         const delta = BABYLON.Matrix.Invert(drag.start).multiply(this._pivot.computeWorldMatrix(true));
+        if (drag.selection.kind === 'node') {
+            const { node } = drag.selection;
+            const parent = node.parent ? node.parent.computeWorldMatrix(true) : BABYLON.Matrix.Identity();
+            const local = drag.world.multiply(delta).multiply(BABYLON.Matrix.Invert(parent));
+            const rotation = new BABYLON.Quaternion();
+            local.decompose(node.scaling, rotation, node.position);
+            node.rotationQuaternion = rotation;
+            drag.selection.onMoved?.();
+            return local;
+        }
         if (drag.selection.kind === 'bones') {
             const locals = drag.worlds.map(({ world, parentWorld }) => world.multiply(delta).multiply(BABYLON.Matrix.Invert(parentWorld)));
             drag.rows.forEach((row, index) => drag.selection.pose.setLocal(row, locals[index]));
@@ -345,6 +363,8 @@ export class TransformEditing {
         if (!drag) return;
         const result = this._apply(true);
         this._drag = null;
+        // A helper of the view: nothing to record
+        if (drag.selection.kind === 'node') return;
         if (drag.selection.kind === 'bones') {
             const { pose } = drag.selection;
             pose.restore(drag.state);

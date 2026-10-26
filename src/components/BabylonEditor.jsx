@@ -565,6 +565,9 @@ export class BabylonEditor {
                                             <button className="player__button player__overlay" data-overlay="boneAxes" title="Show the axes of the bones (X red, Y green, Z blue: how each bone is turned)">
                                                 <i className="codicon codicon-compass"></i>
                                             </button>
+                                            <button className="player__button player__overlay" data-overlay="ground" title="Show the ground: a grid at the lowest point of the selected object at rest (where feet should stand while it moves); in Edit a click on it lets the gizmo move it">
+                                                <i className="codicon codicon-layers"></i>
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
