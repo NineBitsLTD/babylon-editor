@@ -9,6 +9,7 @@ import { CameraViews } from './editor/CameraViews';
 import { ClipFrameEditor } from './editor/ClipFrameEditor';
 import { DocumentEditHistory, EditHistory } from './editor/EditHistory';
 import { FileInfo } from './editor/FileInfo';
+import { formatBytes } from './utils/formatBytes';
 import { HostRequests } from './editor/HostRequests';
 import { ModelConverter } from './editor/ModelConverter';
 import { ModelEdits, objectOf } from './editor/ModelEdits';
@@ -874,7 +875,7 @@ class Editor {
             this._animations.setContainer(container);
             this._history.clear();
             this._changed.clear();
-            this._fileFields = this._textBacked ? null : FileInfo.read(this._type, data);
+            this._fileFields = this._textBacked ? this._textFileFields(data) : FileInfo.read(this._type, data);
             // The views show the cameras of the new model (through new copies) and the new preview camera
             this._viewRendering.setContainer(container);
             this._cameraViews.setContainer(container);
@@ -971,6 +972,26 @@ class Editor {
         // A new way: the inspectors of the model before a reload are gone
         this._backStack = [];
         this._openObject({ kind: 'node', node }, rootItem);
+    }
+
+    /**
+     * The sizes of a text document: of the file as saved (the model file of a converted document,
+     * asked from the host — the field is filled in when it answers) and of the text loaded.
+     * @param {ArrayBuffer | Uint8Array} data
+     * @returns {import('./editor/FileInfo').FileField[]}
+     */
+    _textFileFields(data) {
+        const convertedFrom = window.payload?.convertedFrom;
+        /** @type {import('./editor/FileInfo').FileField} */
+        const saved = { label: 'size', value: '…' };
+        const fields = [saved];
+        if (convertedFrom) fields.push({ label: 'text size', value: formatBytes(data.byteLength) });
+        this._host.request('fileSize').then((size) => {
+            saved.value = size === null ? (convertedFrom ? '—' : `${formatBytes(data.byteLength)} (not saved)`) : `${formatBytes(size)}${convertedFrom ? ` (${convertedFrom})` : ''}`;
+        }, () => { saved.value = '—'; }).then(() => {
+            if (this._fileFields === fields && this._selection?.data.kind === 'file') this._panel.refresh();
+        });
+        return fields;
     }
 
     /** Shows the file fields in the inspector (nothing of the tree is selected). */

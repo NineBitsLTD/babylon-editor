@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { BabylonOptimizer } from '../utils/BabylonOptimizer';
+import { formatBytes } from '../utils/formatBytes';
 
 /**
  * @param {Uint8Array} data a `.babylon` document
@@ -387,7 +388,7 @@ export class ConvertedModels {
             if (reply.error) throw new Error(`${name} could not be converted: ${reply.error}`);
             const data = minifiedIfSet(toBytes(reply.data));
             if (data.byteLength > MAX_TEXT_LENGTH) {
-                throw new Error(`${name} is too large to edit as text (${Math.round(data.byteLength / 1048576)} MB as .babylon)`);
+                throw new Error(`${name} is too large to edit as text (${formatBytes(data.byteLength)} as .babylon)`);
             }
             return { data, source: reply.source };
         };

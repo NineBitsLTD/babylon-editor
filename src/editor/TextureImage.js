@@ -1,5 +1,6 @@
 import * as BABYLON from '@babylonjs/core';
 import { determineMimeType } from '../utils/determineMimeType';
+import { formatBytes } from '../utils/formatBytes';
 import { toBase64Url } from '../utils/toBase64Url';
 import { DEFAULT_UV_STYLE, UvLayout } from './UvLayout';
 
@@ -48,6 +49,53 @@ export function texturePreview(texture) {
     if (url && (!url.startsWith('data:') || url.startsWith('data:image/'))) return url;
     if (!texturePreviews.has(texture)) texturePreviews.set(texture, readTexturePixels(texture));
     return texturePreviews.get(texture);
+}
+
+/** @type {WeakMap<BABYLON.BaseTexture, { url: string | null, size: Promise<string> }>} file sizes by the url they were read for */
+const textureFileSizes = new WeakMap();
+
+/**
+ * Size of the image file of a texture: the bytes it was loaded from (embedded: a data url, the
+ * image of a glTF buffer), else the file at its url; `—` for a texture without one (rendered,
+ * procedural, a cube texture of several files).
+ * @param {BABYLON.BaseTexture} texture
+ * @returns {Promise<string>} e.g. `1.2 MB`
+ */
+export function textureFileSize(texture) {
+    const url = texture instanceof BABYLON.Texture ? texture.url : null;
+    const cached = textureFileSizes.get(texture);
+    if (cached?.url === url) return cached.size;
+    const size = readFileSize(texture, url).then(bytes => (bytes === null ? '—' : formatBytes(bytes)), () => '—');
+    textureFileSizes.set(texture, { url, size });
+    return size;
+}
+
+/**
+ * @param {BABYLON.BaseTexture} texture
+ * @param {string | null} url
+ * @returns {Promise<number | null>} bytes
+ */
+async function readFileSize(texture, url) {
+    const buffer = /** @type {any} */ (texture)._buffer ?? texture.getInternalTexture()?._buffer;
+    if (typeof buffer === 'string') return buffer.startsWith('data:') ? dataUrlSize(buffer) : null;
+    if (buffer instanceof ArrayBuffer || ArrayBuffer.isView(buffer)) return buffer.byteLength;
+    if (buffer instanceof Blob) return buffer.size;
+    if (!url) return null;
+    if (url.startsWith('data:')) return url.startsWith('data:image/') ? dataUrlSize(url) : null;
+    const response = await fetch(url);
+    return response.ok ? (await response.arrayBuffer()).byteLength : null;
+}
+
+/**
+ * @param {string} dataUrl
+ * @returns {number} bytes of the data, without decoding it
+ */
+function dataUrlSize(dataUrl) {
+    const comma = dataUrl.indexOf(',');
+    const data = dataUrl.slice(comma + 1);
+    if (!dataUrl.slice(0, comma).endsWith(';base64')) return new TextEncoder().encode(decodeURIComponent(data)).byteLength;
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    return Math.floor(data.length * 3 / 4) - padding;
 }
 
 /**

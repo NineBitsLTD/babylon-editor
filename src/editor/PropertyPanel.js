@@ -18,7 +18,7 @@ const COLLAPSED_BY_DEFAULT = new Set(['Other file fields']);
  * @typedef {object} PropertyDescriptor
  * @property {string} label
  * @property {PropertyType} type
- * @property {() => any} get
+ * @property {() => any} get a promise for `readonly` and `image` values that are read later (shown when it resolves)
  * @property {(value: any) => void} [set] absent for read-only properties
  * @property {() => any} [capture] exact state snapshot for undo (defaults to get)
  * @property {(state: any) => void} [restore] restores a captured snapshot (defaults to set)
@@ -871,9 +871,12 @@ export class PropertyPanel {
             default: {
                 const text = document.createElement('span');
                 text.className = 'inspector__text';
+                const show = current => { text.textContent = Array.isArray(current) ? current.map(formatNumber).join(', ') : formatNumber(current); };
                 const read = () => {
                     const current = property.get();
-                    text.textContent = Array.isArray(current) ? current.map(formatNumber).join(', ') : formatNumber(current);
+                    if (typeof current?.then !== 'function') return show(current);
+                    if (!text.textContent) text.textContent = '…';
+                    current.then(show, () => show('—'));
                 };
                 read();
                 this._updaters.push(read);

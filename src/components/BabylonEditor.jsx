@@ -455,7 +455,7 @@ export class BabylonEditor {
         // opened file starts
         const viewSettings = this._context.globalState.get(VIEW_SETTINGS_KEY);
         webviewPanel.webview.html = this._getHtmlForWebview(webviewPanel.webview, document, { ...converted, viewSettings, ...payload });
-        WebviewFiles.listen(webviewPanel, vscode.Uri.joinPath(location, '..'));
+        WebviewFiles.listen(webviewPanel, location);
         webviewPanel.webview.onDidReceiveMessage((message) => {
             if (message?.type !== 'viewSettings') return;
             this._context.globalState.update(VIEW_SETTINGS_KEY, { ...this._context.globalState.get(VIEW_SETTINGS_KEY), ...message.settings });

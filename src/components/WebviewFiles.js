@@ -15,21 +15,24 @@ import * as vscode from 'vscode';
  * - `inputBox` `{ title, prompt?, value?, positiveNumber?, nonNegativeNumber? }` asks for a text (a
  *   number > 0 with `positiveNumber`, ≥ 0 with `nonNegativeNumber`); result: the text, or null when cancelled
  * - `showMessage` `{ level: 'info' | 'warning' | 'error', text }` (no reply)
+ * - `fileSize` result: the size in bytes of the model file as saved (of the model file a converted
+ *   document is edited for), or null when it cannot be read
  */
 export class WebviewFiles {
 
     /**
      * Starts answering the requests of a webview.
      * @param {vscode.WebviewPanel} panel
-     * @param {vscode.Uri} folder where the dialogs start (the model folder)
+     * @param {vscode.Uri} file the model file (the dialogs start in its folder)
      * @returns {vscode.Disposable}
      */
-    static listen(panel, folder) {
+    static listen(panel, file) {
+        const folder = vscode.Uri.joinPath(file, '..');
         return panel.webview.onDidReceiveMessage(async (message) => {
             const handler = WebviewFiles._handlers[message?.type];
             if (!handler) return;
             try {
-                const result = await handler(message, folder);
+                const result = await handler(message, folder, file);
                 if (message.requestId !== undefined) panel.webview.postMessage({ type: 'hostReply', requestId: message.requestId, result: result ?? null });
             } catch (error) {
                 if (message.requestId !== undefined) panel.webview.postMessage({ type: 'hostReply', requestId: message.requestId, error: String(error?.message || error) });
@@ -37,7 +40,7 @@ export class WebviewFiles {
         });
     }
 
-    /** @type {Record<string, (message: any, folder: vscode.Uri) => Promise<any>>} */
+    /** @type {Record<string, (message: any, folder: vscode.Uri, file: vscode.Uri) => Promise<any>>} */
     static _handlers = {
         async saveFile({ data, fileName, filters }, folder) {
             const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.joinPath(folder, fileName), filters });
@@ -71,6 +74,13 @@ export class WebviewFiles {
         async showMessage({ level, text }) {
             const show = level === 'error' ? vscode.window.showErrorMessage : level === 'warning' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
             show(text);
+        },
+        async fileSize(message, folder, file) {
+            try {
+                return (await vscode.workspace.fs.stat(file)).size;
+            } catch {
+                return null;
+            }
         },
     };
 }

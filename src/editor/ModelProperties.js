@@ -5,7 +5,7 @@ import { formatNumber } from './DataTable';
 import { isJointTip, jointNodes, textureLabel, triangleCount } from './ModelOutline';
 import { SkeletonScale } from './SkeletonScale';
 import { SkinEdits } from './SkinEdits';
-import { texturePreview } from './TextureImage';
+import { textureFileSize, texturePreview } from './TextureImage';
 
 /**
  * @typedef {object} PropertiesContext
@@ -23,7 +23,7 @@ import { texturePreview } from './TextureImage';
  * @property {(clip: import('./AnimationController').AnimationClip, frame: number) => void} showFrame pauses on a frame of a clip
  * @property {() => number} selectedRow selected row of the inspector table, or -1
  * @property {string} fileName
- * @property {import('./FileInfo').FileField[] | null} fileFields read-only fields of a binary file
+ * @property {import('./FileInfo').FileField[] | null} fileFields read-only fields of the file (header / asset info of a binary file, the sizes of a text document)
  * @property {import('./BabylonJsonBinding').DocumentField[] | null} documentFields editable top-level values of a .babylon text
  * @property {import('./BabylonJsonBinding').BabylonJsonBinding | null} binding the document binding of a .babylon text (null for other formats)
  * @property {(mesh: BABYLON.AbstractMesh) => boolean} isHiddenInView whether a mesh is hidden in the 3D view only
@@ -1012,6 +1012,7 @@ export class ModelProperties {
             textProperty(texture, 'name'),
             readonlyProperty('Type', () => texture.getClassName()),
             readonlyProperty('Size', () => { const size = texture.getSize(); return `${size.width} × ${size.height}`; }),
+            readonlyProperty('File size', () => textureFileSize(texture)),
             numberProperty(texture, 'level', 'Level'),
             booleanProperty(texture, 'hasAlpha', 'Has alpha'),
         ];
@@ -1153,9 +1154,10 @@ export class ModelProperties {
             notice: converted + (documentFields
                 ? 'Values of the file that are not in the model tree. Select an item in the Babylon Model tree to edit the model.'
                 : 'Select an item in the Babylon Model tree to inspect or edit the model.'),
-            properties: documentFields
-                ? ModelProperties._documentGroups(documentFields)
-                : (fileFields ?? []).map(field => readonlyProperty(field.label, () => field.value)),
+            properties: [
+                ...(fileFields ?? []).map(field => readonlyProperty(field.label, () => field.value)),
+                ...(documentFields ? ModelProperties._documentGroups(documentFields) : []),
+            ],
         };
     }
 

@@ -1,6 +1,7 @@
 export * from "./BabylonOptimizer";
 export * from "./collapseBabylon";
 export * from "./determineMimeType";
+export * from "./formatBytes";
 export * from "./getExtension";
 export * from "./jsx-runtime";
 export * from "./parseGlb";

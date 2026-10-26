@@ -1,3 +1,5 @@
+import { formatBytes } from '../utils/formatBytes';
+
 /**
  * A read-only field of a model file shown in the inspector before an item is selected.
  * @typedef {object} FileField
@@ -40,7 +42,7 @@ function gltfFields(json) {
     const embedded = (json.images ?? []).filter(image => image.bufferView !== undefined || image.uri?.startsWith('data:')).length;
     if (embedded) fields.push({ label: 'embedded images', value: embedded });
     const bytes = (json.buffers ?? []).reduce((sum, buffer) => sum + (buffer.byteLength ?? 0), 0);
-    if (bytes) fields.push({ label: 'buffer bytes', value: bytes.toLocaleString('en-US') });
+    if (bytes) fields.push({ label: 'buffers size', value: formatBytes(bytes) });
     return fields;
 }
 
@@ -120,7 +122,7 @@ export class FileInfo {
     static read(type, data) {
         const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
         /** @type {FileField[]} */
-        const fields = [{ label: 'size', value: `${bytes.byteLength.toLocaleString('en-US')} bytes` }];
+        const fields = [{ label: 'size', value: formatBytes(bytes.byteLength) }];
         try {
             switch (type) {
                 case 'glb': {

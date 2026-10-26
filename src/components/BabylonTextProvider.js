@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ConvertedModels } from './ConvertedModels';
 import { collapseBabylon, formatJson, placeholder, PLACEHOLDER_PATTERN } from '../utils/collapseBabylon';
+import { formatBytes } from '../utils/formatBytes';
 
 /**
  * A value cut out of the compact view; its text is read from the live raw document by path.
@@ -33,7 +34,7 @@ const SYNC_DELAY = 150;
 function describe(cut) {
     return cut.kind === 'array'
         ? `${cut.key}: ${cut.size.toLocaleString('en-US')} items`
-        : `${cut.key}: ${Math.round(cut.size / 1024).toLocaleString('en-US')} KB string`;
+        : `${cut.key}: ${formatBytes(cut.size)} string`;
 }
 
 /**
@@ -42,14 +43,6 @@ function describe(cut) {
  */
 function isBabylonFile(uri) {
     return uri.path.toLowerCase().endsWith('.babylon');
-}
-
-/**
- * @param {number} length characters
- * @returns {string}
- */
-function formatSize(length) {
-    return length >= 1e6 ? `${(length / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(length / 1e3))} KB`;
 }
 
 /**
@@ -337,7 +330,7 @@ export class BabylonTextProvider {
         const text = this._cutText(session, cut);
         if (offset < 0 || text === null) return;
         const answer = await vscode.window.showWarningMessage(
-            `Insert ${describe(cut)} (${formatSize(text.length)}) into the text?`,
+            `Insert ${describe(cut)} (${formatBytes(text.length)}) into the text?`,
             { modal: true, detail: 'The values become editable. Large fragments make the editor slower.' },
             'Insert',
         );
@@ -421,7 +414,7 @@ export class BabylonTextProvider {
         if (!cut) return undefined;
         const args = encodeURIComponent(JSON.stringify([document.uri.toString(), id]));
         const markdown = new vscode.MarkdownString(
-            `**Cut-out ${cut.kind}** — ${describe(cut)}, ${formatSize(cut.length)}\n\n`
+            `**Cut-out ${cut.kind}** — ${describe(cut)}, ${formatBytes(cut.length)}\n\n`
             + 'The values stay in the file. '
             + `[Expand](command:${BabylonTextProvider.expandCommand}?${args}) to edit the values here.`,
         );

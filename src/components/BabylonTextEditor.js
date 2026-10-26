@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { BabylonOptimizer } from '../utils/BabylonOptimizer';
+import { formatBytes } from '../utils/formatBytes';
 import { JsonIndex } from '../utils/JsonIndex';
 import { BabylonTextProvider } from './BabylonTextProvider';
 import { ConvertedModels } from './ConvertedModels';
@@ -307,7 +308,7 @@ export class BabylonTextEditor {
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), BabylonOptimizer.format(json, minify));
         await vscode.workspace.applyEdit(edit);
-        const size = text => `${(new TextEncoder().encode(text).byteLength / 1024).toFixed(0)} KB`;
+        const size = text => formatBytes(new TextEncoder().encode(text).byteLength);
         vscode.window.showInformationMessage(`${report}. ${size(active.text)} → ${size(document.getText())} (not saved yet).`);
     }
 
