@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.21.0",
+  "version": "1.22.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -41,6 +41,19 @@
         "priority": "default"
       },
       {
+        "viewType": "babylon-editor.markdownPreview",
+        "displayName": "Markdown Preview (Babylon Editor)",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          },
+          {
+            "filenamePattern": "*.markdown"
+          }
+        ],
+        "priority": "option"
+      },
+      {
         "viewType": "babylon-editor.textEditor",
         "displayName": "BABYLON Editor",
         "selector": [
@@ -57,6 +70,21 @@
         "title": "Open as Compact Text",
         "category": "Babylon",
         "icon": "$(file)"
+      },
+      {
+        "command": "babylon-editor.openMarkdownPreview",
+        "title": "Open Preview (Translate, Read Aloud)",
+        "category": "Babylon",
+        "icon": {
+          "light": "resources/open-model-light.svg",
+          "dark": "resources/open-model-dark.svg"
+        }
+      },
+      {
+        "command": "babylon-editor.openMarkdownRaw",
+        "title": "Open as Raw Markdown",
+        "category": "Babylon",
+        "icon": "$(file-code)"
       },
       {
         "command": "babylon-editor.openFormattedJson",
@@ -212,6 +240,16 @@
           "group": "navigation"
         },
         {
+          "command": "babylon-editor.openMarkdownPreview",
+          "when": "resourceScheme == file && resourceExtname =~ /^\\.(md|markdown)$/i && !activeCustomEditorId && !isInDiffEditor",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openMarkdownRaw",
+          "when": "activeCustomEditorId == babylon-editor.markdownPreview",
+          "group": "navigation"
+        },
+        {
           "command": "babylon-editor.openFormattedJson",
           "when": "resourceScheme == file && resourceExtname =~ /^\\.jsonc?$/i && !activeCustomEditorId && !isInDiffEditor",
           "group": "navigation"
@@ -278,6 +316,14 @@
       ],
       "commandPalette": [
         {
+          "command": "babylon-editor.openMarkdownPreview",
+          "when": "resourceExtname =~ /^\\.(md|markdown)$/i"
+        },
+        {
+          "command": "babylon-editor.openMarkdownRaw",
+          "when": "activeCustomEditorId == babylon-editor.markdownPreview"
+        },
+        {
           "command": "babylon-editor.openFormattedJson",
           "when": "resourceExtname =~ /^\\.jsonc?$/i"
         },
@@ -334,11 +380,11 @@
     "copy:codicons": "mkdir -p dist/codicons && cp node_modules/@vscode/codicons/dist/codicon.css node_modules/@vscode/codicons/dist/codicon.ttf dist/codicons/",
     "compile:sass": "sass src/scss:src/scss",
     "build:js": "esbuild src/extension.js --bundle --minify --outfile=dist/extension.cjs --loader:.jsx=jsx --jsx=automatic --jsx-import-source=./utils --external:vscode --platform=node --format=cjs",
-    "build:js-editor": "esbuild src/editor.js --bundle --minify --outdir=dist/js",
+    "build:js-editor": "esbuild src/editor.js src/markdown.js --bundle --minify --outdir=dist/js",
     "build:css": "npm run compile:sass && esbuild src/scss/*.css --bundle --minify --outdir=dist/css --loader:.css=css && npm run clean:css-temp",
     "build": "npm run clean && npm run build:js && npm run build:js-editor && npm run build:css && npm run copy:codicons && npm run copy:assets",
     "watch:js": "esbuild src/extension.js --bundle --outfile=dist/extension.cjs --loader:.jsx=jsx --jsx=automatic --jsx-import-source=./utils --external:vscode --platform=node --format=cjs --watch",
-    "watch:js-editor": "esbuild src/editor.js --bundle --outdir=dist/js --watch",
+    "watch:js-editor": "esbuild src/editor.js src/markdown.js --bundle --outdir=dist/js --watch",
     "watch:css": "sass --watch --no-source-map src/scss:dist/css",
     "watch:assets": "npx onchange 'public/**/*' -- npm run copy:assets",
     "watch": "npm run build && concurrently 'npm:watch:*'"
@@ -363,7 +409,10 @@
     "@babylonjs/serializers": "^8.41.1",
     "@blueprintjs/core": "^6.4.1",
     "@vscode/codicons": "^0.0.44",
-    "fflate": "^0.8.3"
+    "dompurify": "^3.4.17",
+    "fflate": "^0.8.3",
+    "highlight.js": "^11.12.0",
+    "marked": "^12.0.2"
   },
   "packageManager": "pnpm@10.15.0+sha512.486ebc259d3e999a4e8691ce03b5cac4a71cbeca39372a9b762cb500cfdf0873e2cb16abe3d951b1ee2cf012503f027b98b6584e4df22524e0c7450d9ec7aa7b"
 }

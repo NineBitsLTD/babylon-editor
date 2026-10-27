@@ -42,7 +42,7 @@ function contentSecurityPolicy(webview, nonce) {
 /**
  * @returns {string} a random value for the `nonce` of the scripts of a webview page
  */
-function createNonce() {
+export function createNonce() {
     return globalThis.crypto.randomUUID().replace(/-/g, '');
 }
 
