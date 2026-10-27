@@ -1,7 +1,8 @@
 import * as BABYLON from '@babylonjs/core';
 import { ScreenSelection } from './ScreenSelection';
 import { SELECTED_COLOR, SkeletonView } from './SkeletonView';
-import { POINT_SIZE } from './ViewRendering';
+import { SkinEdits } from './SkinEdits';
+import { POINT_SIZE, VERTICES_LAYER } from './ViewRendering';
 
 const OUTLINE_COLOR = BABYLON.Color3.FromHexString('#ff9f1c');
 
@@ -10,6 +11,10 @@ const K = BABYLON.VertexBuffer;
 const PICK_RADIUS = 10;
 /** Selected vertices drawn at most (a selection of more shows the first ones). */
 const MAX_MARKERS = 5000;
+/** The weights of a bone are drawn in this many shades, from faint (a small weight, still visible) to bright red (1). */
+const WEIGHT_SHADES = 6;
+const FAINT_WEIGHT_COLOR = BABYLON.Color3.FromHexString('#b05a64');
+const FULL_WEIGHT_COLOR = BABYLON.Color3.FromHexString('#ff1a1a');
 
 /**
  * Where a vertex is drawn: its position moved by the bones that influence it (as the skinning
@@ -99,6 +104,8 @@ export class SelectionHighlighter {
         this._skeletonView = null;
         /** @type {BABYLON.Mesh | null} the selected vertices as points */
         this._markers = null;
+        /** @type {BABYLON.Mesh[]} the vertices a bone influences, as points by shade of their weight */
+        this._weightMarkers = [];
         /** @type {SkeletonDisplay} what a new view shows in skeleton mode */
         this.skeletonDisplay = { mesh: true, bones: true };
         /** @type {Set<BABYLON.Bone>} bones not drawn in skeleton mode (view only, kept while switching objects) */
@@ -136,6 +143,7 @@ export class SelectionHighlighter {
         this._skeletonView?.dispose();
         this._skeletonView = null;
         this._disposeMarkers();
+        this.hideBoneWeights();
     }
 
     /**
@@ -149,9 +157,19 @@ export class SelectionHighlighter {
     /**
      * Outlines the given meshes (e.g. a selected mesh, the meshes of a node or of a material).
      * @param {BABYLON.AbstractMesh[]} meshes
+     * @param {boolean} [keepSkeleton] the shown skeleton stays (skeleton mode goes on, no bone highlighted)
      */
-    outlineMeshes(meshes) {
-        this.clear();
+    outlineMeshes(meshes, keepSkeleton = false) {
+        if (keepSkeleton && this._skeletonView) {
+            this._outlined.forEach(mesh => { mesh.renderOutline = false; });
+            this._outlined = [];
+            this._disposeMarkers();
+            this.hideBoneWeights();
+            this._skeletonView.setSelected(null);
+            this._skeletonView.setHighlighted([]);
+        } else {
+            this.clear();
+        }
         const outlined = meshes.filter(mesh => mesh.getTotalVertices?.()).map(mesh => ({ mesh, ...drawnSize(mesh) }));
         // The bounds of skinned meshes are not posed right after a load: the drawn size of the meshes counts too
         const radius = Math.max(this._sceneRadius(), ...outlined.map(({ diagonal }) => diagonal / 2));
@@ -288,6 +306,60 @@ export class SelectionHighlighter {
             material.dispose();
         });
         this._markers = markers;
+    }
+
+    /**
+     * Draws the vertices a bone influences as red points over the model, brighter by their weight
+     * (a faint shade still shows a small one), following them while the pose changes; only in the
+     * views that show the vertex points.
+     * @param {BABYLON.Bone} bone
+     * @param {BABYLON.Mesh[]} meshes meshes its skeleton deforms
+     */
+    showBoneWeights(bone, meshes) {
+        this.hideBoneWeights();
+        /** @type {{ mesh: BABYLON.Mesh, index: number }[][]} */
+        const shades = Array.from({ length: WEIGHT_SHADES }, () => []);
+        let total = 0;
+        for (const mesh of meshes) {
+            for (const [index, weight] of SkinEdits.boneWeights(mesh, bone.getIndex())) {
+                if (total++ >= MAX_MARKERS) break;
+                shades[Math.min(WEIGHT_SHADES - 1, Math.floor(Math.min(weight, 1) * WEIGHT_SHADES))].push({ mesh, index });
+            }
+        }
+        const point = new BABYLON.Vector3();
+        shades.forEach((vertices, shade) => {
+            if (!vertices.length) return;
+            const place = (positions) => {
+                vertices.forEach(({ mesh, index }, slot) => {
+                    if (drawnVertexPosition(mesh, index, point)) point.toArray(positions, slot * 3);
+                });
+                return positions;
+            };
+            const positions = place(new Float32Array(vertices.length * 3));
+            const markers = new BABYLON.Mesh('__editorBoneWeights', this._scene);
+            markers.setVerticesData(K.PositionKind, positions, true);
+            markers.setIndices(vertices.map((_, slot) => slot));
+            const material = new BABYLON.StandardMaterial('__editorBoneWeights', this._scene);
+            Object.assign(material, { pointsCloud: true, pointSize: POINT_SIZE + 1, disableLighting: true, backFaceCulling: false });
+            material.emissiveColor = BABYLON.Color3.Lerp(FAINT_WEIGHT_COLOR, FULL_WEIGHT_COLOR, shade / (WEIGHT_SHADES - 1));
+            markers.material = material;
+            markers.isPickable = false;
+            markers.alwaysSelectAsActiveMesh = true;
+            markers.layerMask = VERTICES_LAYER;
+            // Over the model and the selected vertices
+            markers.renderingGroupId = 2;
+            const observer = this._scene.onAfterRenderObservable.add(() => markers.updateVerticesData(K.PositionKind, place(positions)));
+            markers.onDisposeObservable.add(() => {
+                this._scene.onAfterRenderObservable.remove(observer);
+                material.dispose();
+            });
+            this._weightMarkers.push(markers);
+        });
+    }
+
+    hideBoneWeights() {
+        this._weightMarkers.forEach(markers => markers.dispose());
+        this._weightMarkers = [];
     }
 
     _disposeMarkers() {

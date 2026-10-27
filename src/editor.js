@@ -26,7 +26,9 @@ import { BONES_LAYER, MODEL_LAYER } from './editor/SkeletonView';
 import { TextureImage } from './editor/TextureImage';
 import { TransformEditing } from './editor/TransformEditing';
 import { VERTICES_LAYER, ViewRendering } from './editor/ViewRendering';
+import { SkinEdits } from './editor/SkinEdits';
 import { Toolbar } from './editor/Toolbar';
+import { ViewNotice } from './editor/ViewNotice';
 
 const vscode = acquireVsCodeApi();
 
@@ -235,6 +237,9 @@ class Editor {
         this._singleView = singleView;
         /** The ground was clicked in the edit mode: the gizmo moves it */
         this._groundPicked = false;
+        /** @type {BABYLON.Bone | null} the bone picked in a view showing both the bones and the vertices: its vertices are marked, selected ones can be bound to it */
+        this._skinBone = null;
+        this._viewNotice = new ViewNotice(root.querySelector('.viewport'));
         /** @type {{ slots: string[], selected: number } | null} the desktop a double click on a view left */
         this._desktopReturn = null;
         this._narrow = false;
@@ -608,6 +613,12 @@ class Editor {
             // A click lets go of the ground; in the edit mode a click on it (nothing in front) lets the gizmo move it
             this._groundPicked = false;
             const bone = this._highlighter.pickBone(x, y);
+            // A view showing both the bones and the vertices: a click picks one bone, vertices are boxed
+            if (this._skinMode()) {
+                if (bone) this._pickSkinBone(bone);
+                else if (mode === 'replace' && this._pickGround(x, y)) this._groundPicked = true;
+                return;
+            }
             if (bone) {
                 if (mode === 'remove') {
                     this._panel.selectObjects([bone], 'remove');
@@ -680,6 +691,11 @@ class Editor {
         this._cursor = mode;
         this._tool = tool;
         const editing = mode === 'edit';
+        if (!editing && this._skinBone) {
+            this._skinBone = null;
+            this._highlighter.hideBoneWeights();
+            this._viewNotice.hide();
+        }
         this._boxSelection.enabled = editing;
         this._cameraViews.setSelectMode(editing);
         this._transform.setTool(editing ? tool : null);
@@ -729,9 +745,108 @@ class Editor {
     }
 
     /**
+     * @returns {boolean} the edit mode in a view that shows both the bones and the vertex points:
+     *   a click picks one bone, a rectangle selects vertices, which can be bound to the bone; the
+     *   gizmo moves neither
+     */
+    _skinMode() {
+        const shows = this._viewShows();
+        return this._cursor === 'edit' && shows.bones && shows.vertices;
+    }
+
+    /**
+     * Picks the bone of the skin mode (a click on it again lets it go): its vertices are marked by
+     * their weight; the inspector of a mesh it deforms selects them in its vertex table, any other
+     * selects the bone as a click does without the vertices shown.
+     * @param {BABYLON.Bone} bone
+     */
+    _pickSkinBone(bone) {
+        this._viewNotice.hide();
+        if (bone === this._skinBone) {
+            this._skinBone = null;
+            this._highlighter.hideBoneWeights();
+            this._highlighter.selectBone(null);
+            return;
+        }
+        this._skinBone = bone;
+        const mesh = this._selectedMesh();
+        if (mesh && (!mesh.skeleton || mesh.skeleton === bone.getSkeleton())) {
+            this._highlighter.selectBone(bone);
+            const vertices = mesh.skeleton ? [...SkinEdits.boneWeights(mesh, bone.getIndex()).keys()] : [];
+            this._panel.selectObjects(vertices.map(vertex => ({ vertex })), 'replace');
+        } else if (bone !== this._highlighter.selectedBone) {
+            this._revealBone(bone);
+        }
+        this._showSkinWeights();
+    }
+
+    /**
+     * Marks the vertices of the bone of the skin mode while its skeleton is shown; lets the bone go
+     * when another skeleton (or none) is shown.
+     */
+    _showSkinWeights() {
+        const bone = this._skinBone;
+        if (!bone || this._highlighter.shownSkeleton !== bone.getSkeleton() || !this._container) {
+            this._skinBone = null;
+            this._highlighter.hideBoneWeights();
+            this._viewNotice.hide();
+            return;
+        }
+        if (!this._highlighter.selectedBone) this._highlighter.selectBone(bone);
+        const meshes = this._container.meshes.filter(mesh => mesh instanceof BABYLON.Mesh && mesh.skeleton === bone.getSkeleton() && mesh.getTotalVertices() > 0);
+        this._highlighter.showBoneWeights(bone, meshes);
+    }
+
+    /**
+     * After vertices were selected in the skin mode: offers to bind those of the selection the bone
+     * does not influence yet to it.
+     */
+    _offerSkinBinding() {
+        const bone = this._skinBone;
+        const mesh = this._selectedMesh();
+        const skeleton = bone?.getSkeleton();
+        if (!bone || !mesh || !this._canEdit || (mesh.skeleton && mesh.skeleton !== skeleton)) {
+            this._viewNotice.hide();
+            return;
+        }
+        const unbound = () => {
+            const influenced = mesh.skeleton ? SkinEdits.boneWeights(mesh, bone.getIndex()) : new Map();
+            return this._panel.selectedRows.filter(vertex => !influenced.has(vertex));
+        };
+        const count = unbound().length;
+        if (!count) {
+            this._viewNotice.hide();
+            return;
+        }
+        const name = bone.name || '(unnamed)';
+        this._viewNotice.show(`${count} ${count === 1 ? 'vertex' : 'vertices'} selected: bind to the bone ${name}?`, [{
+            label: 'Bind',
+            title: 'A vertex without bones follows this bone alone; one with other bones shares its weight with them by the distance to each bone (as the automatic weights)',
+            primary: true,
+            run: () => {
+                const vertices = unbound();
+                if (!vertices.length || this._selectedMesh() !== mesh) return;
+                const meshes = [mesh];
+                this._markChanged(mesh, 'modified');
+                this._report(() => {
+                    let bound = 0;
+                    this._history.executeMutation(
+                        `Bind ${vertices.length} vertices to ${name}`,
+                        () => SkinEdits.captureInfluences(meshes),
+                        () => { bound = SkinEdits.bindToBone(mesh, vertices, bone, this._binding); },
+                        state => SkinEdits.restoreInfluences(state, this._binding),
+                    );
+                    this._showSkinWeights();
+                    return `Bound ${bound} vertices of ${mesh.name} to ${name}`;
+                });
+            },
+        }, { label: 'Cancel', run: () => {} }]);
+    }
+
+    /**
      * What the gizmo moves in the edit mode: the selected bones of the bone table (skeleton or clip
      * inspector) while the view under the pointer shows the bones, else the selected vertices of the
-     * mesh shown while it shows the vertices.
+     * mesh shown while it shows the vertices; nothing in the skin mode.
      * @returns {import('./editor/TransformEditing').EditSelection}
      */
     _editSelection() {
@@ -740,6 +855,7 @@ class Editor {
         if (this._groundPicked && ground && this._cameraViews.settingsOf(this._cameraViews.focus).ground) {
             return { kind: 'node', node: ground, rows: [0], onMoved: () => this._viewRendering.markGroundMoved() };
         }
+        if (this._skinMode()) return null;
         const table = this._panel.table;
         const rows = this._panel.selectedRows;
         const shows = this._viewShows();
@@ -758,12 +874,26 @@ class Editor {
     _selectInRect(rect, mode) {
         const skeleton = this._highlighter.shownSkeleton;
         const shows = this._viewShows();
+        if (this._skinMode()) {
+            this._selectVerticesInRect(rect, mode);
+            this._offerSkinBinding();
+            return;
+        }
         if (shows.bones) {
             const mesh = this._container?.meshes.find(candidate => candidate.skeleton === skeleton) ?? null;
             const bones = ScreenSelection.bonesInRect(this._scene, skeleton, mesh, rect).filter(bone => !this._highlighter.isBoneHidden(bone));
             if (this._selectBones(bones, mode)) return;
         }
-        if (!shows.vertices) return;
+        if (shows.vertices) this._selectVerticesInRect(rect, mode);
+    }
+
+    /**
+     * Selects the vertices of the mesh the inspector shows in a rectangle; when it shows none or none
+     * of its vertices are inside, the mesh with the most vertices inside opens with them.
+     * @param {import('./editor/ScreenSelection').ScreenRect} rect
+     * @param {import('./editor/BoxSelection').SelectionMode} mode
+     */
+    _selectVerticesInRect(rect, mode) {
         const occluders = this._vertexOccluders();
         const mesh = this._selectedMesh();
         const vertices = mesh ? ScreenSelection.verticesInRect(this._scene, mesh, rect, occluders) : [];
@@ -1180,8 +1310,8 @@ class Editor {
     async _exportModel({ requestId, data, format, source }) {
         const { rootUrl = '' } = window.payload || {};
         try {
-            const result = await ModelConverter.fromBabylon({ engine: this._scene.getEngine(), data, type: format, source, rootUrl });
-            vscode.postMessage({ type: 'exported', requestId, data: result });
+            const { data: result, warnings } = await ModelConverter.fromBabylon({ engine: this._scene.getEngine(), data, type: format, source, rootUrl });
+            vscode.postMessage({ type: 'exported', requestId, data: result, warnings });
         } catch (error) {
             console.error('[BabylonEditor] Failed to export the model', error);
             vscode.postMessage({ type: 'exported', requestId, error: String(error?.message || error) });
@@ -1521,6 +1651,8 @@ class Editor {
     _highlight(data) {
         this._placeGround();
         ModelProperties.highlight(data, this._propertiesContext());
+        this._viewNotice.hide();
+        this._showSkinWeights();
         this._syncSkeletonButtons();
         this._updateLayout();
     }

@@ -223,13 +223,148 @@ export class SkinEdits {
     }
 
     /**
+     * @param {BABYLON.Mesh} mesh
+     * @param {number} boneIndex the number of a bone (as the vertices refer to it)
+     * @returns {Map<number, number>} the vertices the bone influences, with its weight
+     */
+    static boneWeights(mesh, boneIndex) {
+        const weights = new Map();
+        for (const { indices, weights: values } of influenceSets(mesh)) {
+            for (let place = 0; place < indices.length; place++) {
+                if (indices[place] !== boneIndex || !(values[place] > 0)) continue;
+                const vertex = Math.floor(place / 4);
+                weights.set(vertex, (weights.get(vertex) ?? 0) + values[place]);
+            }
+        }
+        return weights;
+    }
+
+    /**
+     * The skin of meshes (their skeleton, influences and influencers), captured for undo.
+     * @param {BABYLON.Mesh[]} meshes
+     * @returns {{ mesh: BABYLON.Mesh, skeleton: BABYLON.Skeleton | null, influencers: number, data: Map<string, Float32Array> }[]}
+     */
+    static captureInfluences(meshes) {
+        const kinds = INFLUENCE_SETS.flatMap(set => [set.indicesKind, set.weightsKind]);
+        return meshes.map(mesh => ({
+            mesh,
+            skeleton: mesh.skeleton,
+            influencers: mesh.numBoneInfluencers,
+            data: new Map(kinds.filter(kind => mesh.isVerticesDataPresent(kind)).map(kind => [kind, Float32Array.from(mesh.getVerticesData(kind))])),
+        }));
+    }
+
+    /**
+     * Puts captured skins back; influences a mesh did not have are removed.
+     * @param {ReturnType<typeof SkinEdits.captureInfluences>} state
+     * @param {import('./BabylonJsonBinding').BabylonJsonBinding | null} [binding]
+     */
+    static restoreInfluences(state, binding = null) {
+        for (const { mesh, skeleton, influencers, data } of state) {
+            mesh.skeleton = skeleton;
+            for (const set of INFLUENCE_SETS) {
+                for (const kind of [set.indicesKind, set.weightsKind]) {
+                    if (data.has(kind)) mesh.setVerticesData(kind, Float32Array.from(data.get(kind)), true, 4);
+                    else if (mesh.isVerticesDataPresent(kind)) mesh.removeVerticesData(kind);
+                }
+            }
+            mesh.numBoneInfluencers = influencers;
+            SkinEdits._writeInfluences(mesh, binding);
+        }
+    }
+
+    /**
+     * Binds vertices of a mesh to a bone. A vertex no bone influences yet follows the bone alone
+     * (weight 1); one influenced by other bones shares its weight between them and the bone as the
+     * automatic weights do: by the inverse fourth power of the distance to each bone in the bind pose
+     * (at most as many influences as the mesh has slots, the weakest left out). Vertices the bone
+     * influences already are not changed. A mesh without a skeleton gets the skeleton of the bone; a
+     * mesh without influences gets them, its other vertices following the root bone.
+     * @param {BABYLON.Mesh} mesh
+     * @param {number[]} vertices
+     * @param {BABYLON.Bone} bone
+     * @param {import('./BabylonJsonBinding').BabylonJsonBinding | null} [binding]
+     * @returns {number} the vertices bound
+     */
+    static bindToBone(mesh, vertices, bone, binding = null) {
+        const skeleton = bone.getSkeleton();
+        if (mesh.skeleton && mesh.skeleton !== skeleton) throw new Error(`${mesh.name} is deformed by another skeleton (${mesh.skeleton.name})`);
+        const boneIndex = bone.getIndex();
+        const count = mesh.getTotalVertices();
+        if (!mesh.skeleton) mesh.skeleton = skeleton;
+        // The root bone given to the vertices of a mesh without influences is no influence of its own
+        const created = !mesh.isVerticesDataPresent(K.MatricesIndicesKind) || !mesh.isVerticesDataPresent(K.MatricesWeightsKind);
+        if (created) {
+            // A vertex without weights would collapse to the origin: the others follow the root bone
+            let root = bone;
+            while (root.getParent()) root = root.getParent();
+            const indices = new Float32Array(count * 4);
+            const weights = new Float32Array(count * 4);
+            for (let vertex = 0; vertex < count; vertex++) {
+                indices[vertex * 4] = root.getIndex();
+                weights[vertex * 4] = 1;
+            }
+            mesh.setVerticesData(K.MatricesIndicesKind, indices, true, 4);
+            mesh.setVerticesData(K.MatricesWeightsKind, weights, true, 4);
+        }
+        const sets = influenceSets(mesh);
+        const slots = sets.length * 4;
+        const positions = mesh.getVerticesData(K.PositionKind);
+        const segments = new Map(SkinEdits._bindSegments(skeleton, true).map(segment => [segment.index, segment]));
+        const point = new BABYLON.Vector3();
+        const distanceTo = (index) => {
+            const segment = segments.get(index);
+            return segment ? Math.min(...segment.ends.map(end => segmentDistance(point, segment.start, end))) : Infinity;
+        };
+        let bound = 0;
+        let used = mesh.numBoneInfluencers;
+        for (const vertex of new Set(vertices)) {
+            if (vertex < 0 || vertex >= count) continue;
+            const current = new Set();
+            if (!created) sets.forEach(({ indices, weights }) => {
+                for (let slot = 0; slot < 4; slot++) if (weights[vertex * 4 + slot] > 0) current.add(indices[vertex * 4 + slot]);
+            });
+            if (current.has(boneIndex)) continue;
+            let influences;
+            if (!current.size) {
+                influences = [{ index: boneIndex, weight: 1 }];
+            } else {
+                point.fromArray(positions, vertex * 3);
+                const nearest = [...current, boneIndex].map(index => ({ index, distance: distanceTo(index) }));
+                const scale = Math.max(Math.min(...nearest.map(({ distance }) => distance)), 1e-6);
+                influences = nearest.map(({ index, distance }) => ({ index, weight: Number.isFinite(distance) ? 1 / (distance / scale + 1e-3) ** 4 : 0 }))
+                    .sort((a, b) => b.weight - a.weight).slice(0, slots);
+                const total = influences.reduce((sum, { weight }) => sum + weight, 0);
+                influences.forEach((influence) => { influence.weight = total > 0 ? influence.weight / total : 0; });
+            }
+            sets.forEach(({ indices, weights }, setIndex) => {
+                for (let slot = 0; slot < 4; slot++) {
+                    const influence = influences[setIndex * 4 + slot];
+                    indices[vertex * 4 + slot] = influence?.index ?? 0;
+                    weights[vertex * 4 + slot] = influence?.weight ?? 0;
+                }
+            });
+            used = Math.max(used, influences.length);
+            bound++;
+        }
+        for (const { set, indices, weights } of sets) {
+            mesh.setVerticesData(set.indicesKind, indices, true, 4);
+            mesh.setVerticesData(set.weightsKind, weights, true, 4);
+        }
+        mesh.numBoneInfluencers = Math.min(Math.max(used, 1), slots);
+        SkinEdits._writeInfluences(mesh, binding);
+        return bound;
+    }
+
+    /**
      * The bones that can deform the mesh as segments of the bind pose, in the space of the vertices.
      * @param {BABYLON.Skeleton} skeleton
+     * @param {boolean} [withControl] control bones (IK, pole targets) too
      * @returns {{ index: number, start: BABYLON.Vector3, ends: BABYLON.Vector3[] }[]}
      */
-    static _bindSegments(skeleton) {
+    static _bindSegments(skeleton, withControl = false) {
         const heads = new Map(skeleton.bones.map(bone => [bone, bone.getAbsoluteInverseBindMatrix().clone().invert().getTranslation()]));
-        const deforming = skeleton.bones.filter(bone => !CONTROL_BONE.test(bone.name));
+        const deforming = skeleton.bones.filter(bone => withControl || !CONTROL_BONE.test(bone.name));
         return deforming.map((bone) => {
             const start = heads.get(bone);
             const children = bone.getChildren().filter(child => deforming.includes(child)).map(child => heads.get(child));

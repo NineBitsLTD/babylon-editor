@@ -47,6 +47,9 @@ const FORMAT_LOSSES = {
  */
 const MAX_TEXT_LENGTH = 48 * 1024 * 1024;
 
+/** The message of a save the user cancelled (after being told what the format loses). */
+const SAVE_CANCELLED = 'Saving was cancelled';
+
 /**
  * @param {Uint8Array | null} a
  * @param {Uint8Array | null} b
@@ -193,10 +196,28 @@ export class ConvertedModels {
         const work = async (panel) => {
             const reply = await this._tasks.run(panel, 'exportModel', { data: toArrayBuffer(data), format: type, source });
             if (reply.error) throw new Error(reply.error);
-            return toBytes(reply.data);
+            return { bytes: toBytes(reply.data), warnings: reply.warnings ?? [] };
         };
         const panel = this._panelOf(document);
-        return panel ? work(panel) : this._tasks.withHelper(location, `Converting to .${type}`, work);
+        const { bytes, warnings } = await (panel ? work(panel) : this._tasks.withHelper(location, `Converting to .${type}`, work));
+        if (warnings.length && !(await ConvertedModels._confirmLosses(type, warnings))) throw new Error(SAVE_CANCELLED);
+        return bytes;
+    }
+
+    /**
+     * Asks whether to save although the format loses parts of this model.
+     * @param {string} type
+     * @param {string[]} warnings what the file will not have
+     * @returns {Promise<boolean>}
+     */
+    static async _confirmLosses(type, warnings) {
+        const save = 'Save Anyway';
+        const answer = await vscode.window.showWarningMessage(
+            `The .${type} file will not have all of the model`,
+            { modal: true, detail: warnings.map(warning => `• ${warning}`).join('\n') },
+            save,
+        );
+        return answer === save;
     }
 
     // --- FileSystemProvider ----------------------------------------------------------------------
@@ -237,13 +258,26 @@ export class ConvertedModels {
         if (!WRITABLE_TYPES.includes(entry.type)) {
             throw vscode.FileSystemError.NoPermissions(`.${entry.type} files cannot be written: use Save As to save ${name} in another format`);
         }
-        if (!(await this.confirmFormat(entry.type, name))) throw vscode.FileSystemError.Unavailable('Saving was cancelled');
-        const bytes = await this.export(uri, content, entry.type);
+        if (!(await this.confirmFormat(entry.type, name))) throw vscode.FileSystemError.Unavailable(SAVE_CANCELLED);
+        let bytes;
+        try {
+            bytes = await this.export(uri, content, entry.type);
+        } catch (error) {
+            if (error?.message === SAVE_CANCELLED) throw vscode.FileSystemError.Unavailable(SAVE_CANCELLED);
+            throw error;
+        }
         // Set before writing, so the file watcher recognizes the own change
         entry.written = bytes;
         await vscode.workspace.fs.writeFile(entry.original, bytes);
         entry.data = content;
         entry.mtime = Date.now();
+        // The document shows what the file now holds (the format may have changed or dropped parts),
+        // not the text that was saved: it is converted again and VS Code reloads it
+        this._convert(entry.original, bytes, this._panelOf(uri)).then((converted) => {
+            if (entry.written !== bytes || isSameContent(converted.data, entry.data)) return;
+            Object.assign(entry, { data: converted.data, source: converted.source, mtime: Date.now() });
+            this._onDidChangeFile.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+        }, error => vscode.window.showWarningMessage(String(error?.message || error)));
     }
 
     /**
@@ -277,10 +311,16 @@ export class ConvertedModels {
         const type = ConvertedModels.saveAsType(target);
         const name = target.path.split('/').pop();
         if (!(await this.confirmFormat(type, name))) return;
-        const data = await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Window, title: `Saving ${name}…` },
-            () => convert(type),
-        );
+        let data;
+        try {
+            data = await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Window, title: `Saving ${name}…` },
+                () => convert(type),
+            );
+        } catch (error) {
+            if (error?.message === SAVE_CANCELLED) return;
+            throw error;
+        }
         await vscode.workspace.fs.writeFile(target, type === 'babylon' ? minifiedIfSet(data) : data);
         const open = 'Open';
         if (await vscode.window.showInformationMessage(`Saved ${name}.`, open) === open) await vscode.commands.executeCommand('vscode.open', target);

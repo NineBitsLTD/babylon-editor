@@ -180,7 +180,12 @@ export class BabylonEditor {
         this._webviewPanels.set(document.uri.toString(), webviewPanel);
 
         const treeTracking = this._modelTree.trackPanel(webviewPanel, document.uri);
-        webviewPanel.onDidDispose(() => treeTracking.dispose());
+        webviewPanel.onDidDispose(() => {
+            treeTracking.dispose();
+            // The document may outlive the panel (a converted model closes its binary editor), and a
+            // disposed webview throws on postMessage
+            if (this._webviewPanels.get(document.uri.toString()) === webviewPanel) this._webviewPanels.delete(document.uri.toString());
+        });
 
         // Добавляем обработчик сообщений из Webview
         webviewPanel.webview.onDidReceiveMessage(e => {

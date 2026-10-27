@@ -503,10 +503,10 @@ export class ModelProperties {
     static highlight(data, context) {
         const { highlighter, container } = context;
         switch (data.kind) {
-            case 'node':
-                return highlighter.outlineMeshes(data.node instanceof BABYLON.AbstractMesh
-                    ? [data.node, ...data.node.getChildMeshes()]
-                    : data.node.getChildMeshes());
+            case 'node': {
+                const meshes = data.node instanceof BABYLON.AbstractMesh ? [data.node, ...data.node.getChildMeshes()] : data.node.getChildMeshes();
+                return highlighter.outlineMeshes(meshes, ModelProperties._keepsSkeleton(data.node, meshes, highlighter.shownSkeleton));
+            }
             case 'material':
                 return highlighter.outlineMeshes(container.meshes.filter(mesh => mesh.material === data.material));
             case 'skeleton':
@@ -521,6 +521,19 @@ export class ModelProperties {
             default:
                 return highlighter.clear();
         }
+    }
+
+    /**
+     * @param {BABYLON.TransformNode} node a selected node
+     * @param {BABYLON.AbstractMesh[]} meshes the meshes of its hierarchy
+     * @param {BABYLON.Skeleton | null} skeleton the shown skeleton
+     * @returns {boolean} the node does not change the skeleton: it is one of its joints, or no mesh
+     *   of its hierarchy is deformed by another skeleton (a mesh without one can be bound to it), so
+     *   the bones stay shown
+     */
+    static _keepsSkeleton(node, meshes, skeleton) {
+        if (!skeleton) return false;
+        return skeleton.bones.some(bone => bone.getTransformNode() === node) || meshes.every(mesh => !mesh.skeleton || mesh.skeleton === skeleton);
     }
 
     /**

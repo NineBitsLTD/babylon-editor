@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -57,6 +57,18 @@
         "title": "Open as Compact Text",
         "category": "Babylon",
         "icon": "$(json)"
+      },
+      {
+        "command": "babylon-editor.openFormattedJson",
+        "title": "Open Formatted JSON",
+        "category": "Babylon",
+        "icon": "$(json)"
+      },
+      {
+        "command": "babylon-editor.openRawJson",
+        "title": "Open as Raw JSON",
+        "category": "Babylon",
+        "icon": "$(file-code)"
       },
       {
         "command": "babylon-editor.expandFragment",
@@ -200,6 +212,16 @@
           "group": "navigation"
         },
         {
+          "command": "babylon-editor.openFormattedJson",
+          "when": "resourceScheme == file && resourceExtname =~ /^\\.jsonc?$/i && !activeCustomEditorId && !isInDiffEditor",
+          "group": "navigation"
+        },
+        {
+          "command": "babylon-editor.openRawJson",
+          "when": "resourceScheme == json-formatted",
+          "group": "navigation"
+        },
+        {
           "command": "babylon-editor.openCollapsedText",
           "when": "activeCustomEditorId == babylon-editor.textEditor",
           "group": "navigation"
@@ -255,6 +277,14 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "babylon-editor.openFormattedJson",
+          "when": "resourceExtname =~ /^\\.jsonc?$/i"
+        },
+        {
+          "command": "babylon-editor.openRawJson",
+          "when": "resourceScheme == json-formatted"
+        },
         {
           "command": "babylon-editor.tree.add",
           "when": "false"

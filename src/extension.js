@@ -4,6 +4,7 @@ import { BabylonTextEditor, BabylonTextEditorID } from './components/BabylonText
 import { BabylonTextProvider } from './components/BabylonTextProvider';
 import { ConvertedModels } from './components/ConvertedModels';
 import { JsonDocuments } from './components/JsonDocuments';
+import { JsonFormattedView } from './components/JsonFormattedView';
 import { ModelTreeProvider } from './components/ModelTreeProvider';
 import { WebviewTasks } from './components/WebviewTasks';
 
@@ -20,6 +21,8 @@ export function activate(context) {
 	context.subscriptions.push(documents.register());
 	const textProvider = new BabylonTextProvider(modelEditorOf, documents);
 	context.subscriptions.push(textProvider.register());
+	// .json files: a formatted view next to the raw text, saved compact
+	context.subscriptions.push(new JsonFormattedView().register());
 	const binaryEditor = new BabylonEditor(context.extensionUri, context, modelTree);
 	context.subscriptions.push(
 		vscode.window.registerCustomEditorProvider(
