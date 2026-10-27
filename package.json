@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",

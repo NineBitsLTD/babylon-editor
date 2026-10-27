@@ -81,7 +81,7 @@ export class BabylonEditor {
         // Карта для хранения открытых панелей и документов
         this._openDocuments = new Map();
         
-        // Карта для хранения WebviewPanel, чтобы иметь возможность отправлять сообщения
+        /** @type {Map<string, vscode.WebviewPanel[]>} the open panels of a document, the one edited last at the end */
         this._webviewPanels = new Map();
 
         // Pending 'getFileData' requests to webviews: requestId -> { resolve, reject }
@@ -177,14 +177,17 @@ export class BabylonEditor {
             });
         });
         // Сохраняем панель для отправки сообщений (например, для reloadScene)
-        this._webviewPanels.set(document.uri.toString(), webviewPanel);
+        const key = document.uri.toString();
+        this._webviewPanels.set(key, [...(this._webviewPanels.get(key) ?? []), webviewPanel]);
 
         const treeTracking = this._modelTree.trackPanel(webviewPanel, document.uri);
         webviewPanel.onDidDispose(() => {
             treeTracking.dispose();
             // The document may outlive the panel (a converted model closes its binary editor), and a
             // disposed webview throws on postMessage
-            if (this._webviewPanels.get(document.uri.toString()) === webviewPanel) this._webviewPanels.delete(document.uri.toString());
+            const others = (this._webviewPanels.get(key) ?? []).filter(panel => panel !== webviewPanel);
+            if (others.length) this._webviewPanels.set(key, others);
+            else this._webviewPanels.delete(key);
         });
 
         // Добавляем обработчик сообщений из Webview
@@ -248,6 +251,9 @@ export class BabylonEditor {
      */
     _onWebviewEdit(document, webviewPanel, label) {
         document.hasUnsavedEdits = true;
+        // Each panel has its own scene: the edited one is what a save writes
+        const key = document.uri.toString();
+        this._webviewPanels.set(key, [...(this._webviewPanels.get(key) ?? []).filter(panel => panel !== webviewPanel), webviewPanel]);
         this._onDidChangeCustomDocument.fire({
             document,
             label,
@@ -263,7 +269,7 @@ export class BabylonEditor {
      * @returns {Promise<Uint8Array>}
      */
     _requestFileData(document, format = undefined) {
-        const webviewPanel = this._webviewPanels.get(document.uri.toString());
+        const webviewPanel = this._webviewPanels.get(document.uri.toString())?.at(-1);
         if (!webviewPanel) {
             return Promise.reject(new Error('The editor of this document is closed'));
         }
@@ -322,7 +328,7 @@ export class BabylonEditor {
         await vscode.workspace.fs.writeFile(document.uri, data);
         document.hasUnsavedEdits = false;
         // The tree decorations of the changed objects start over
-        this._webviewPanels.get(document.uri.toString())?.webview.postMessage({ type: 'documentSaved' });
+        this._webviewPanels.get(document.uri.toString())?.forEach(panel => panel.webview.postMessage({ type: 'documentSaved' }));
     }
     
     /**
@@ -421,15 +427,12 @@ export class BabylonEditor {
      */
     async _reloadScene(uri) {
         const document = this._openDocuments.get(uri.toString());
-        const webviewPanel = this._webviewPanels.get(uri.toString());
-        
-        if (document && webviewPanel) {
+        const panels = this._webviewPanels.get(uri.toString()) ?? [];
+
+        if (document && panels.length) {
             try {
                 document.content = await vscode.workspace.fs.readFile(uri);
-                webviewPanel.webview.postMessage({ 
-                    type: 'reloadModel', 
-                    data: document.getArrayBuffer()
-                });
+                panels.forEach(panel => panel.webview.postMessage({ type: 'reloadModel', data: document.getArrayBuffer() }));
             } catch (error) {
                 console.error(`Error reloading scene for ${uri.fsPath}:`, error);
                 vscode.window.showErrorMessage(`Failed to reload content: ${error.message}`);

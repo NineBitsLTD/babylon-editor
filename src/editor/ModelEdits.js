@@ -78,10 +78,14 @@ function isMirrored(node) {
 }
 
 /**
- * What pasting a clip asks the host before it can go on (the skeleton it goes to, how its channels
- * are taken), or reports when done.
- * @typedef {{ choose: 'skeleton' | 'channels', title?: string, options: { id: string, label: string, description: string }[] } | { report: string }} PasteResult
+ * What pasting a clip asks the host before it can go on (the skeleton it goes to, how its bones
+ * map onto it, how its channels are taken), or reports when done.
+ * @typedef {{ choose: 'skeleton' | 'channels', title?: string, options: { id: string, label: string, description: string }[] }
+ *   | { choose: 'bones', title: string, key: string, sources: BoneMapEntry[], targets: { name: string }[], mapping: Record<string, string | null> }
+ *   | { report: string }} PasteResult
  */
+
+/** @typedef {{ name: string, depth: number }} BoneMapEntry a bone and how deep it hangs in its skeleton */
 
 /** @typedef {'all' | 'rotations' | 'retarget' | 'difference'} ClipChannels how the channels of a pasted clip are taken */
 
@@ -141,6 +145,16 @@ function shiftKeys(keys, offset) {
 const GEOMETRY_ONLY_KEYS = new Set(['id', 'uniqueId', 'updatable']);
 /** Runtime or scene references of a serialized mesh that a copy does not keep. */
 const MESH_RUNTIME_KEYS = ['uniqueId', 'geometryId', 'geometryUniqueId', 'materialUniqueId', 'skeletonUniqueId', 'instances', 'morphTargetManagerId', 'parentInstanceIndex'];
+
+/**
+ * @param {string} text
+ * @returns {string} a short hash of the text (djb2), to name it in a key
+ */
+function hashText(text) {
+    let hash = 5381;
+    for (let index = 0; index < text.length; index++) hash = ((hash * 33) ^ text.charCodeAt(index)) >>> 0;
+    return hash.toString(36);
+}
 
 /**
  * @param {string} name
@@ -949,7 +963,7 @@ export class ModelEdits {
      * @param {ClipboardObject} object
      * @param {boolean} [sameFile] it was copied from this model: the copy keeps sharing the materials,
      *   the skeletons and the parent of the original (another model gets copies of them)
-     * @param {{ skeletonId?: string, channels?: ClipChannels }} [choices] answers to a `PasteResult.choose`
+     * @param {{ skeletonId?: string, channels?: ClipChannels, bones?: Record<string, string | null> }} [choices] answers to a `PasteResult.choose`
      * @returns {PasteResult | undefined}
      */
     paste(section, object, sameFile = false, choices = {}) {
@@ -1012,10 +1026,12 @@ export class ModelEdits {
      * Adds a copied clip, its tracks finding their targets by name. A model keeps one kind of clips:
      * an animation group goes in as a new group, a frame range of a timeline as keys appended to the
      * end of the timeline of a skeleton (and of nodes) with a new range. Tracks without a target are
-     * left out (the report names them). A clip of another skeleton, or converted, asks how its
-     * channels are taken: retargeted to the skeleton (when the clip has its rig), rotations only or all.
+     * left out (the report names them). The bones of a clip of another skeleton are mapped onto the
+     * bones of this one first (`choose: 'bones'`: matched by name, each can be another free bone or
+     * left out). A clip of another skeleton, or converted, asks how its channels are taken:
+     * retargeted to the skeleton (when the clip has its rig), rotations only or all.
      * @param {CopiedClip} copied
-     * @param {{ skeletonId?: string, channels?: ClipChannels }} choices
+     * @param {{ skeletonId?: string, channels?: ClipChannels, bones?: Record<string, string | null> }} choices
      * @param {boolean} sameFile
      * @returns {PasteResult}
      */
@@ -1029,10 +1045,8 @@ export class ModelEdits {
         const converted = kind !== copied.type;
         const nodes = new Map([...container.transformNodes, ...container.meshes].map(node => [node.name, node]));
         let skeletons = container.skeletons;
-        // Tracks that go to bones once converted: in a timeline every track of a joint node
-        const boneTracks = copied.tracks.filter(track => (kind === 'timeline' ? track.target?.kind === 'bone' || (converted && track.target?.kind === 'node') : track.target?.kind === 'bone'));
-        const boneNames = [...new Set(boneTracks.map(track => track.target.name))];
-        if (boneNames.length && skeletons.length > 1) {
+        const sourceBones = ModelEdits._clipBones(copied, kind, converted);
+        if (sourceBones.length && skeletons.length > 1) {
             const chosen = skeletons.find(skeleton => String(skeleton.uniqueId) === choices.skeletonId);
             if (!chosen) {
                 return {
@@ -1040,17 +1054,25 @@ export class ModelEdits {
                     options: skeletons.map(skeleton => ({
                         id: String(skeleton.uniqueId),
                         label: skeleton.name || '(unnamed)',
-                        description: `${boneNames.filter(boneName => skeleton.bones.some(bone => bone.name === boneName)).length} of ${boneNames.length} bones`,
+                        description: `${sourceBones.filter(source => ModelEdits._sameBone(source, skeleton.bones)).length} of ${sourceBones.length} bones by name`,
                     })),
                 };
             }
             skeletons = [chosen];
         }
         const skeleton = skeletons[0] ?? null;
-        // The skeleton a retargeted clip goes to: that of the bones, or the one of the joint nodes
-        const rigSkeleton = kind === 'timeline' && boneNames.length
+        // The bones of a clip of another skeleton are mapped onto this one (by the user)
+        const target = sourceBones.length ? skeleton : null;
+        let mapNote = '';
+        if (target && !(sameFile && copied.rig?.id === String(target.id ?? ''))) {
+            if (!choices.bones) return ModelEdits._boneMapQuestion(copied, sourceBones, target);
+            ({ clip: copied, note: mapNote } = ModelEdits._mapClipBones(copied, sourceBones, choices.bones, target, kind));
+            if (!copied.tracks.length) throw new Error(`No bone of ${copied.name || 'the clip'} is transferred`);
+        }
+        // The skeleton a retargeted clip goes to: the mapped one, else that of the bones or of the joint nodes
+        const rigSkeleton = target ?? (kind === 'timeline' && sourceBones.length
             ? skeleton
-            : ClipRetarget.skeletonByNames(copied.tracks.map(track => track.target?.name), container);
+            : ClipRetarget.skeletonByNames(copied.tracks.map(track => track.target?.name), container));
         const canRetarget = !!copied.rig && !!rigSkeleton;
         const ownSkeleton = sameFile && copied.rig?.id === String(rigSkeleton?.id ?? '');
         if (!choices.channels && (converted || (canRetarget && !ownSkeleton))) {
@@ -1081,7 +1103,116 @@ export class ModelEdits {
         }
         const unique = [...new Set(missing)];
         const conversion = converted ? `; converted from ${copied.type === 'group' ? 'an animation group' : 'a frame range'}` : '';
-        return { report: `Pasted ${name}: ${matched.length} of ${source.tracks.length} tracks${conversion}${note}${unique.length ? `; not found: ${unique.slice(0, 5).join(', ')}${unique.length > 5 ? ', …' : ''}` : ''}` };
+        return { report: `Pasted ${name}: ${matched.length} of ${source.tracks.length} tracks${conversion}${mapNote}${note}${unique.length ? `; not found: ${unique.slice(0, 5).join(', ')}${unique.length > 5 ? ', …' : ''}` : ''}` };
+    }
+
+    /**
+     * @param {CopiedClip} copied
+     * @param {'group' | 'timeline'} kind the kind of clips of this model
+     * @param {boolean} converted the clip is converted to that kind
+     * @returns {{ name: string, node: string | null, parent: string | null }[]} the bones the clip
+     *   animates: the bones of its rig with a track (by bone or linked node name), in the order of
+     *   the rig; without a rig the targets of its bone tracks (in a timeline also of joint node tracks)
+     */
+    static _clipBones(copied, kind, converted) {
+        const names = new Set(copied.tracks.map(track => track.target?.name));
+        if (copied.rig?.bones?.length) {
+            return copied.rig.bones.filter(bone => names.has(bone.name) || (bone.node && names.has(bone.node)))
+                .map(({ name, node, parent }) => ({ name, node: node ?? null, parent: parent ?? null }));
+        }
+        const boneTracks = copied.tracks.filter(track => track.target?.kind === 'bone' || (kind === 'timeline' && converted && track.target?.kind === 'node'));
+        return [...new Set(boneTracks.map(track => track.target.name))].map(name => ({ name, node: null, parent: null }));
+    }
+
+    /**
+     * @param {{ name: string, node: string | null }} source a bone of a copied clip
+     * @param {BABYLON.Bone[]} bones
+     * @returns {BABYLON.Bone | null} the bone of the same name (by bone or linked node name)
+     */
+    static _sameBone(source, bones) {
+        const names = [source.name, source.node].filter(Boolean);
+        return bones.find(bone => names.includes(bone.name) || names.includes(bone.getTransformNode()?.name)) ?? null;
+    }
+
+    /**
+     * The question that maps the bones of a clip onto a skeleton: each bone of the clip with the bone
+     * of the same name, if any (one target bone per clip bone). `key` names the pair of skeletons,
+     * so the host can offer the mapping chosen last for it.
+     * @param {CopiedClip} copied
+     * @param {{ name: string, node: string | null, parent: string | null }[]} sources
+     * @param {BABYLON.Skeleton} skeleton
+     * @returns {PasteResult}
+     */
+    static _boneMapQuestion(copied, sources, skeleton) {
+        const used = new Set();
+        const mapping = {};
+        for (const source of sources) {
+            const bone = ModelEdits._sameBone(source, skeleton.bones);
+            mapping[source.name] = bone && !used.has(bone) ? bone.name : null;
+            if (bone) used.add(bone);
+        }
+        const parents = new Map((copied.rig?.bones ?? []).map(bone => [bone.name, bone.parent ?? null]));
+        const depthIn = (name, parentOf) => {
+            let depth = 0;
+            for (let parent = parentOf(name); parent && depth < 256; parent = parentOf(parent)) depth++;
+            return depth;
+        };
+        const sourceNames = (copied.rig?.bones ?? sources).map(bone => bone.name).join('|');
+        return {
+            choose: 'bones',
+            title: `Bones of ${copied.name || 'the clip'} on ${skeleton.name || 'the skeleton'}`,
+            key: `${hashText(sourceNames)}>${hashText(skeleton.bones.map(bone => bone.name).join('|'))}`,
+            sources: sources.map(source => ({ name: source.name, depth: depthIn(source.name, name => parents.get(name) ?? null) })),
+            targets: skeleton.bones.map(bone => ({ name: bone.name })),
+            mapping,
+        };
+    }
+
+    /**
+     * A copied clip with its bones renamed as mapped onto a skeleton: the tracks of a bone go to the
+     * bone chosen for it (its linked node in a model of animation groups), those of a bone left out
+     * are dropped; the rig is renamed the same way (bones without a track keep their name when the
+     * skeleton has a free bone of it), so retargeting matches the mapped bones.
+     * @param {CopiedClip} copied
+     * @param {{ name: string, node: string | null }[]} sources
+     * @param {Record<string, string | null>} mapping clip bone name -> skeleton bone name (null: left out)
+     * @param {BABYLON.Skeleton} skeleton
+     * @param {'group' | 'timeline'} kind the kind of clips of this model
+     * @returns {{ clip: CopiedClip, note: string }}
+     */
+    static _mapClipBones(copied, sources, mapping, skeleton, kind) {
+        const bones = new Map(skeleton.bones.map(bone => [bone.name, bone]));
+        const targetName = bone => (kind === 'group' ? bone.getTransformNode()?.name ?? bone.name : bone.name);
+        /** @type {Map<string, BABYLON.Bone | null>} names of a clip bone (bone and node) -> its bone */
+        const byName = new Map();
+        let renamed = 0;
+        let dropped = 0;
+        for (const source of sources) {
+            const bone = bones.get(mapping[source.name]) ?? null;
+            if (!bone) dropped++;
+            else if (bone !== ModelEdits._sameBone(source, skeleton.bones)) renamed++;
+            [source.name, source.node].filter(Boolean).forEach(name => byName.set(name, bone));
+        }
+        const tracks = copied.tracks.flatMap((track) => {
+            if (!byName.has(track.target?.name)) return [track];
+            const bone = byName.get(track.target.name);
+            return bone ? [{ ...track, target: { ...track.target, name: targetName(bone) } }] : [];
+        });
+        let rig = copied.rig;
+        if (rig?.bones?.length) {
+            const taken = new Set([...byName.values()].filter(Boolean));
+            /** @type {Map<string, { name: string, node: string | null }>} */
+            const names = new Map(rig.bones.map((bone) => {
+                const mapped = byName.has(bone.name) ? byName.get(bone.name) : null;
+                const same = byName.has(bone.name) ? null : ModelEdits._sameBone(bone, skeleton.bones);
+                const chosen = mapped ?? (same && !taken.has(same) ? same : null);
+                // A bone left out matches nothing
+                return [bone.name, chosen ? { name: chosen.name, node: chosen.getTransformNode()?.name ?? null } : { name: `\u0000${bone.name}`, node: null }];
+            }));
+            rig = { ...rig, bones: rig.bones.map(bone => ({ ...bone, ...names.get(bone.name), parent: bone.parent == null ? bone.parent : names.get(bone.parent)?.name ?? bone.parent })) };
+        }
+        const parts = [renamed ? `${renamed} mapped to other bones` : '', dropped ? `${dropped} left out` : ''].filter(Boolean);
+        return { clip: { ...copied, tracks, rig }, note: parts.length ? `; bones: ${parts.join(', ')}` : '' };
     }
 
     /**

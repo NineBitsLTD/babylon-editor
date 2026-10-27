@@ -49,6 +49,8 @@ export class ModelTreeProvider {
         this._nextRequestId = 0;
         /** @type {((uri: vscode.Uri, source: import('../editor/ModelTreeBridge').TreeItemSource) => Promise<'modified' | 'added' | null>) | null} */
         this._stateResolver = null;
+        /** @type {Map<string, Record<string, string | null>>} bone mappings chosen this session, by the pair of skeletons */
+        this._boneMaps = new Map();
         /** @type {WeakMap<vscode.WebviewPanel, vscode.Uri>} file of each tracked panel */
         this._uris = new WeakMap();
         /** @type {Map<string, ModelTreeNode>} nodes received so far, by id (for getParent) */
@@ -259,18 +261,25 @@ export class ModelTreeProvider {
             // Not JSON: not a copied object
         }
         if (!object) throw new Error(`The clipboard has no copied object: copy one with Copy in the model tree first`);
-        // A clip may ask how its channels are taken and which skeleton it goes to
+        // A clip may ask which skeleton it goes to, how its bones map onto it and how its channels are taken
         const questions = {
             channels: { key: 'channels', title: `Channels of ${object.value?.name ?? 'the clip'}` },
             skeleton: { key: 'skeletonId', title: `Skeleton for ${object.value?.name ?? 'the clip'}` },
+            bones: { key: 'bones' },
         };
         const choices = {};
         let result = await this._command({ op: 'paste', section, extra: { object, sameFile, choices } });
         for (let asked = 0; result?.choose && questions[result.choose] && asked < Object.keys(questions).length; asked++) {
             const question = questions[result.choose];
-            const picked = await vscode.window.showQuickPick(result.options.map(option => ({ ...option, option })), { title: result.title ?? question.title });
-            if (!picked) return;
-            choices[question.key] = picked.option.id;
+            if (result.choose === 'bones') {
+                const mapping = await this._askBoneMap(result);
+                if (!mapping) return;
+                choices.bones = mapping;
+            } else {
+                const picked = await vscode.window.showQuickPick(result.options.map(option => ({ ...option, option })), { title: result.title ?? question.title });
+                if (!picked) return;
+                choices[question.key] = picked.option.id;
+            }
             result = await this._command({ op: 'paste', section, extra: { object, sameFile, choices } });
         }
         if (result?.report) vscode.window.showInformationMessage(result.report);
@@ -285,21 +294,50 @@ export class ModelTreeProvider {
     }
 
     /**
+     * Maps the bones of a pasted clip in the dialog of the editor, starting from the mapping chosen
+     * last for the same pair of skeletons this session (where its bones are still free).
+     * @param {{ key: string, title: string, sources: { name: string }[], targets: { name: string }[], mapping: Record<string, string | null> }} request
+     * @returns {Promise<Record<string, string | null> | null>} null when cancelled
+     */
+    async _askBoneMap(request) {
+        const remembered = this._boneMaps.get(request.key);
+        const mapping = { ...request.mapping };
+        if (remembered) {
+            const targets = new Set(request.targets.map(target => target.name));
+            const taken = new Set();
+            const recalled = request.sources.filter(({ name }) => name in remembered && (remembered[name] === null || targets.has(remembered[name])));
+            for (const { name } of recalled) {
+                mapping[name] = remembered[name];
+                if (remembered[name]) taken.add(remembered[name]);
+            }
+            // Bones matched by name keep their bone unless a remembered pair took it
+            for (const { name } of request.sources.filter(source => !recalled.includes(source))) {
+                if (mapping[name] && taken.has(mapping[name])) mapping[name] = null;
+                else if (mapping[name]) taken.add(mapping[name]);
+            }
+        }
+        const chosen = await this._command({ op: 'mapBones', extra: { request: { ...request, mapping } } }, 0);
+        if (chosen) this._boneMaps.set(request.key, chosen);
+        return chosen;
+    }
+
+    /**
      * Sends a tree command to the active editor webview and waits for its result.
      * @param {object} command
+     * @param {number} [timeout] milliseconds to wait for the answer; 0 waits for the user (a dialog)
      * @returns {Promise<any>}
      */
-    _command(command) {
+    _command(command, timeout = REQUEST_TIMEOUT) {
         const panel = this._panel;
         if (!panel) return Promise.reject(new Error('Open a model in the Babylon editor first'));
         const requestId = ++this._nextRequestId;
         return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
+            const timer = timeout > 0 ? setTimeout(() => {
                 this._commands.delete(requestId);
                 reject(new Error('The editor did not answer'));
-            }, REQUEST_TIMEOUT);
+            }, timeout) : null;
             this._commands.set(requestId, (message) => {
-                clearTimeout(timeout);
+                clearTimeout(timer);
                 if (message.error) reject(new Error(message.error));
                 else resolve(message.result);
             });

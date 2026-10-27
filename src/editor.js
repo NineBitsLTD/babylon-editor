@@ -4,6 +4,7 @@ import * as fflate from 'fflate';
 import { AnimationController } from './editor/AnimationController';
 import { BabylonJsonBinding } from './editor/BabylonJsonBinding';
 import { CameraController } from './editor/CameraController';
+import { BoneMapDialog } from './editor/BoneMapDialog';
 import { BoxSelection, selectionMode } from './editor/BoxSelection';
 import { CameraViews } from './editor/CameraViews';
 import { ClipFrameEditor } from './editor/ClipFrameEditor';
@@ -240,6 +241,7 @@ class Editor {
         /** @type {BABYLON.Bone | null} the bone picked in a view showing both the bones and the vertices: its vertices are marked, selected ones can be bound to it */
         this._skinBone = null;
         this._viewNotice = new ViewNotice(root.querySelector('.viewport'));
+        this._boneMapDialog = new BoneMapDialog(root);
         /** @type {{ slots: string[], selected: number } | null} the desktop a double click on a view left */
         this._desktopReturn = null;
         this._narrow = false;
@@ -453,6 +455,8 @@ class Editor {
             case 'add': return this._edits.add(section, kind, name, extra);
             case 'copy': return this._edits.copy(data);
             case 'paste': return this._edits.paste(section, extra?.object, extra?.sameFile, extra?.choices);
+            // The host asks the user through the dialog of the editor (answered when it is closed)
+            case 'mapBones': return this._boneMapDialog.show(extra.request);
             default: throw new Error(`Unknown command ${op}`);
         }
     }
@@ -1871,7 +1875,7 @@ class Editor {
                     break;
                 case 'treeCommand':
                     try {
-                        vscode.postMessage({ type: 'treeCommandResult', requestId: message.requestId, result: this._runTreeCommand(message) ?? null });
+                        vscode.postMessage({ type: 'treeCommandResult', requestId: message.requestId, result: (await this._runTreeCommand(message)) ?? null });
                     } catch (error) {
                         vscode.postMessage({ type: 'treeCommandResult', requestId: message.requestId, error: String(error?.message || error) });
                     }
