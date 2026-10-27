@@ -2,7 +2,7 @@
   "name": "babylon-editor",
   "displayName": "Babylon Editor",
   "description": "",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "publisher": "ninebits",
   "license": "MIT",
   "type": "module",
@@ -56,13 +56,13 @@
         "command": "babylon-editor.openCollapsedText",
         "title": "Open as Compact Text",
         "category": "Babylon",
-        "icon": "$(json)"
+        "icon": "$(file-zip)"
       },
       {
         "command": "babylon-editor.openFormattedJson",
         "title": "Open Formatted JSON",
         "category": "Babylon",
-        "icon": "$(json)"
+        "icon": "$(file-text)"
       },
       {
         "command": "babylon-editor.openRawJson",
