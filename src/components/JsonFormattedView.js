@@ -3,25 +3,30 @@ import { formatJson, minifyJson, stripJsonc } from '../utils/collapseBabylon';
 
 /** The message of a save the user cancelled. */
 const SAVE_CANCELLED = 'Saving was cancelled';
+/** Objects without nested objects up to this length (animation keys) stay on one line, as conversions write them. */
+const INLINE_OBJECT_LENGTH = 160;
 
 /**
  * @param {vscode.Uri} uri
- * @returns {boolean} a `.json` or `.jsonc` file (not `.babylon` / `.gltf`, which have views of their own)
+ * @returns {boolean} a model file that is JSON: `.babylon`, `.gltf`, `.gltf2` (other `.json` files
+ *   have the same view in the extension tts-stt-md-aloud)
  */
 function isJsonFile(uri) {
-    return /\.jsonc?$/i.test(uri.path);
+    return /\.(babylon|gltf2?)$/i.test(uri.path);
 }
 
 /**
- * A formatted view of a `.json` / `.jsonc` file (JSONC is read as JSON: comments and trailing commas are left out): a `FileSystemProvider` for the `json-formatted` scheme
- * (`json-formatted:<path>?<real file uri>`) that serves the file formatted (indented as the editor
- * indents JSON) and saves it compact, without line breaks and indentation (asked once per file and
- * session). Formatting and compacting change only the whitespace outside of strings. The raw text
- * stays the default editor of `.json` files; the editor titles of both have a button for the other.
+ * A formatted view of a model file that is JSON — `.babylon`, `.gltf`, `.gltf2` (JSONC is read as
+ * JSON: comments and trailing commas are left out): a `FileSystemProvider` for the `babylon-json`
+ * scheme (`babylon-json:<path>?<real file uri>`) that serves the file formatted (indented as the
+ * editor indents JSON, small objects such as animation keys on one line) and saves it compact,
+ * without line breaks and indentation (asked once per file and session). Formatting and compacting
+ * change only the whitespace outside of strings. The raw text stays the text editor of these files;
+ * the editor titles of both have a button for the other.
  */
 export class JsonFormattedView {
 
-    static scheme = 'json-formatted';
+    static scheme = 'babylon-json';
     static openCommand = 'babylon-editor.openFormattedJson';
     static rawCommand = 'babylon-editor.openRawJson';
 
@@ -61,13 +66,13 @@ export class JsonFormattedView {
     }
 
     /**
-     * Opens the formatted view of a `.json` file in place of its raw text tab.
+     * Opens the formatted view of a model file in place of its raw text tab.
      * @param {vscode.Uri} [uri]
      */
     async open(uri) {
         const target = this._realTarget(uri);
         if (!target || !isJsonFile(target)) {
-            vscode.window.showWarningMessage('Select a .json or .jsonc file to open it formatted.');
+            vscode.window.showWarningMessage('Select a .babylon or .gltf file to open it formatted.');
             return;
         }
         const raw = vscode.workspace.textDocuments.find(document => document.uri.toString() === target.toString());
@@ -168,7 +173,7 @@ export class JsonFormattedView {
         } catch {
             return bytes;
         }
-        return new TextEncoder().encode(`${formatJson(text.trim(), JsonFormattedView._indent())}\n`);
+        return new TextEncoder().encode(`${formatJson(text.trim(), JsonFormattedView._indent(), '', INLINE_OBJECT_LENGTH)}\n`);
     }
 
     /**
