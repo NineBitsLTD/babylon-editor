@@ -2,12 +2,18 @@
 
 A Visual Studio Code extension that renders 3D model files directly inside the editor using [Babylon.js](https://www.babylonjs.com/). Open a model to inspect it in an interactive viewport, then edit its nodes, materials, bones, animations and vertices and save it back — no external tools or web server required.
 
+## Open source
+
+Babylon Editor is an open source project under the [MIT license](LICENSE). Its source code is on GitHub: **[github.com/NineBitsLTD/babylon-editor](https://github.com/NineBitsLTD/babylon-editor)**.
+
+The requirements and how to install the extension or build it from source are described after the features: [Requirements](#requirements), [Getting started (development)](#getting-started-development), [Packaging and installing](#packaging-and-installing).
+
 ## Features
 
 - **3D view** — open a supported model file and it renders immediately in an interactive Babylon.js viewport, with camera auto-orbit (off on open, toggle in the playback bar at the bottom of the view). Drag with the left button to rotate, with the right button to move the model, scroll to zoom; the home button in the view bar at the top resets the view.
 - **Animations** — pick a clip in the model tree; the inspector lists all animated bones with their position, rotation or scaling (switch above the table) at a selected frame, as a table or as graphs (curves per frame with draggable keys, horizontal and vertical zoom) (the first frame by default; step with **Prev** / **Next**). Edit a value to change the pose at that frame — a key is created if the frame has none (◆ marks existing keys). **Play** plays the clip and turns into **Pause** while it plays; the playback bar at the bottom of the view has play/pause and a seek slider, with tags of the mesh, the skeleton and the current clip above it; click a tag to open its object in the inspector and select it in the model tree. glTF animation groups and the named animation ranges of `.babylon` skeletons are both listed.
 - **Cursor modes** — the toolbar (next to the layouts) switches what the left button does in every view: **View** (V, turns the camera) and **Edit** — the left button selects (a click or a rectangle; Shift adds, Option / Alt takes out) and the camera turns with the middle button. A click or a rectangle on bones or on vertices of any visible mesh opens their skeleton or mesh in the inspector with them selected. The tools **Move** (W), **Rotate** (E) and **Scale** (R) show a gizmo at the centre of the selection, as in 3ds Max: selected vertices move where they are drawn (also on an animated mesh), selected bones change the pose of the inspector — the rest or bind pose of the skeleton inspector, a key at the shown frame of the clip inspector. The normals around moved vertices are made again. **Local axes** (X) turns the gizmo to the axes of the first selected bone (or of the mesh) instead of the world axes. Each drag is one undo step.
-- **Selection rectangle** — in Select and Edit the left button draws a selection rectangle: it selects the bones whose joints it holds while a skeleton is shown, else the vertices of the mesh shown in the inspector that no polygon hides (all of them in the lines view). Shift adds to the selection, Option / Alt takes out — also for a click on a bone or a vertex.
+- **Selection rectangle** — in Edit the left button draws a selection rectangle: it selects the bones whose joints it holds while a skeleton is shown, else the vertices of the mesh shown in the inspector that no polygon hides (all of them in the lines view). Shift adds to the selection, Option / Alt takes out — also for a click on a bone or a vertex.
 - **Vertices** — while a mesh is shown in the inspector, a click on one of its vertices in the 3D view selects it in the vertex table; Shift+click (there or in the table) selects several. A right click on the selection deletes the vertices (with the triangles that use them) or merges them into one at their centre.
 - **Remove hidden geometry** — the mesh inspector (and the inspector of a node above meshes, for each of them) removes the triangles the outside air never reaches — walls inside the solid, shells inside shells, closed voids — and the vertices no triangle uses. The mesh is put into a grid and the air is flooded in from outside, so a hole of any shape (a spiral, a cavity with an opening) stays a surface; openings narrower than about two cells of the grid (asked, 256 along the longest side by default) count as closed. Each mesh is tested alone, in the positions of the file. One undo step.
 - **Merge meshes** — the inspector of a node above several meshes merges them into the first one (`.babylon` documents): one sub-mesh per material, a multi-material when there are several; skinned meshes must share the skeleton and the space, meshes with morph targets are not merged. One undo step.
@@ -89,7 +95,7 @@ npm run build      # clean → bundle extension + webview + css → copy codicon
 
 ```bash
 npm install        # also installs @vscode/vsce (a dev dependency)
-npm run package    # runs npm run build, then packs babylon-editor-<version>.vsix into the project folder
+npm run pack       # vsce runs npm run build (vscode:prepublish), then packs babylon-editor-<version>.vsix into the project folder
 ```
 
 Install the package in VS Code with **Extensions: Install from VSIX…** (Command Palette, the `…` menu of the Extensions view, or right-click the `.vsix` in the Explorer → **Install Extension VSIX**), then run **Developer: Reload Window**. Raise `version` in `package.json` before packaging an update.
@@ -144,7 +150,7 @@ dist/                       # bundled output loaded by VS Code (git-ignored)
 | --- | --- |
 | `npm run build` | Full production build into `dist/` |
 | `npm run watch` | Build once, then run all esbuild/sass watchers concurrently |
-| `npm run package` | Build, then pack the extension into a `.vsix` |
+| `npm run pack` | Build, then pack the extension into a `.vsix` |
 | `build:js` / `build:js-editor` / `build:css` | Rebuild a single target |
 
 ## License
